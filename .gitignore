@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+repos/
+data/
+models/
+results/
+third_party/
+*.npy
+.env
+factory_out/
+*.log
