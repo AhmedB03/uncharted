@@ -31,7 +31,13 @@ def load_atoms(repos_dir):
     atoms = []
     for d in sorted(Path(repos_dir).iterdir()):
         f = d / "refined_ideas.json"
-        if not f.exists():
+        meta = d / "meta.json"
+        if not f.exists() or not meta.exists():
+            continue
+        # Availability modeling needs at least one contributor per repo; a repo with
+        # none (e.g. torvalds/linux's GitHub mirror reports no contributors via the API)
+        # can't resolve downstream in the original code's profiles_from_sources.
+        if not json.loads(meta.read_text()).get("contributors"):
             continue
         for r in json.loads(f.read_text()).get("ratings", []):
             text = r.get("revised_idea") or r.get("idea")
