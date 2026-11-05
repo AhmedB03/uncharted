@@ -60,8 +60,16 @@ def write_spec(reg, cluster_ids, names, repos, model, rpm, **extra):
     atoms = [names.get(c, f"cluster {c}") for c in cluster_ids]
     listing = "\n".join(
         f"- {a}   (e.g. {', '.join(sorted(repos[c])[:3]) or 'n/a'})" for a, c in zip(atoms, cluster_ids))
+    prompt = PROMPT.format(atoms=listing)
     try:
-        spec = llm.parse_json(llm.chat(PROMPT.format(atoms=listing), model, rpm, max_tokens=2000))
+        spec = llm.parse_json(llm.chat(prompt, model, rpm, max_tokens=2000))
+    except ValueError as e:  # unparseable reply: ask once more with the error attached
+        try:
+            spec = llm.parse_json(llm.chat(prompt + f"\n\nYour previous reply was not valid JSON ({e}). Reply "
+                                           "with ONLY the JSON object, double-quoted keys, no comments.",
+                                           model, rpm, max_tokens=2000))
+        except Exception as e2:
+            return None, str(e2)
     except Exception as e:
         return None, str(e)
     slug = reg.unique_slug(slugify(spec.get("slug") or spec.get("title", "")))
