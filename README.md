@@ -26,7 +26,7 @@ build-db   repos as papers, contributors as authors (original schema)      -> da
 train      original Alien code, unchanged: coherence transformer + contributor dual encoder
 sample     rank triplets by (1 - beta) z(coherence) + beta z(unavailability)
 show       readable combinations with example repos per atom
-benchmark  (planned) spec writing + Claude Code / Copilot agent build trials, common vs alien
+benchmark  common vs alien: same spec prompt, model and build loop on both arms -> results/benchmark.md
 ```
 
 Step 1 writes exactly the file formats the original repo reads, so steps 2 and 3 run on the authors' code with no modifications. That was verified end to end: `make-datasets`, `make-availability`, `train-coherence`, `train-availability` and `sample` all run on Uncharted output.
@@ -82,6 +82,22 @@ python uncharted.py gallery --refresh-stars                  # factory_out/galle
 * **gallery** is a static page of everything, failures included, ranked by stars. Host it on GitHub Pages.
 
 Everything lands in `factory_out/registry.json`, which becomes the dataset: which kinds of alien combinations get built, which fail, and which people actually star.
+
+## The benchmark: do models get worse in the alien space?
+
+```bash
+python uncharted.py benchmark --n 8 --model ollama/qwen2.5:7b   # resumable
+python uncharted.py benchmark --report-only                      # results/benchmark.md
+```
+
+Two arms go through the identical spec prompt, build loop and model:
+
+* **alien**: the sampler's top combinations (coherent, low availability).
+* **common**: three-technique combinations that a real repo in the corpus already contains, preferring triples several repos share. By construction these sit in the dense part of GitHub.
+
+The report compares build rate, repair iterations and test counts per arm, plus a one-sided Fisher exact test. Ideas live in their own registry (`factory_out/benchmark`) so they never mix with publishable output. With a few ideas per arm it is a pilot; the interesting runs use a stronger model and `--n 20` or more.
+
+**Small local models:** builds ask for plain `===== FILE: path =====` blocks rather than code inside JSON, since small models routinely break JSON escaping. Ollama calls get a 16k context window (`UNCHARTED_NUM_CTX`), because Ollama's 4096 default silently truncates fix prompts.
 
 **Safety:** generated code runs inside Docker with no network when Docker is installed (`uncharted-runner` image, built automatically). Without Docker it runs as a plain subprocess after a warning, so install Docker Desktop before running the factory on your main machine.
 

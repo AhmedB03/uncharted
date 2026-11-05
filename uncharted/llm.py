@@ -29,7 +29,13 @@ def chat(prompt, model=None, rpm=8, max_tokens=8000, temperature=0.4, system=Non
             time.sleep(wait)
         _last_call[0] = time.time()
         try:
-            r = completion(model=model, messages=messages, max_tokens=max_tokens, temperature=temperature)
+            extra = {}
+            if model.startswith(("ollama/", "ollama_chat/")):
+                # Ollama defaults to a 4096 token window and silently truncates past it, which
+                # cuts the spec/files/pytest output out of fix prompts.
+                extra["num_ctx"] = int(os.environ.get("UNCHARTED_NUM_CTX", "16384"))
+            r = completion(model=model, messages=messages, max_tokens=max_tokens, temperature=temperature,
+                           **extra)
             text = r.choices[0].message.content or ""
             if text.strip():
                 return text
