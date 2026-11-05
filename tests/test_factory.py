@@ -113,6 +113,26 @@ def test_hints_flag_non_stdlib_imports():
     assert build.stdlib_hints("No module named 'json'", "x") == ""
 
 
+def test_foreign_imports_detected_and_purged(tmp_path, monkeypatch):
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "pkg" / "__init__.py").write_text("from .core import f\n")
+    (tmp_path / "pkg" / "core.py").write_text("import json, os\nimport markdown\nfrom aiohttp import web\n"
+                                              "def f():\n    return 1\n")
+    (tmp_path / "tests" / "test_pkg.py").write_text("import pytest\nfrom pkg import f\nfrom pkg.core import f\n")
+    assert build.foreign_imports(tmp_path, "pkg") == {"pkg/core.py": ["aiohttp", "markdown"]}
+
+    def rewrite(prompt, *a, **k):
+        assert "markdown" in prompt and "===== FILE: pkg/core.py =====" in prompt
+        return "===== FILE: pkg/core.py =====\nimport json\ndef f():\n    return 1\n===== END ====="
+    monkeypatch.setattr(llm, "chat", rewrite)
+
+    class A:
+        model, rpm = "x", 999
+    assert build.purge_foreign_imports(tmp_path, "pkg", A) == {}
+    assert "markdown" not in (tmp_path / "pkg" / "core.py").read_text()
+
+
 def test_parse_json_tolerates_trailing_commas():
     assert llm.parse_json('here: {"a": [1, 2,], "b": "line1\nline2",}') == {"a": [1, 2], "b": "line1\nline2"}
 

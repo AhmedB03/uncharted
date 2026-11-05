@@ -200,6 +200,57 @@ def loc(root):
                for p in root.rglob("*.py") if "__pycache__" not in p.parts and "tests" not in p.parts)
 
 
+STDLIB_PROMPT = """This Python file imports {mods}, which are NOT in the Python 3.11 standard library and
+are not installed. Rewrite the file so it does the same job using ONLY the standard library
+(plus pytest in test files). Keep every function, class and name it exposes.
+
+===== FILE: {rel} =====
+{code}
+===== END =====
+
+""" + FIX_FORMAT
+
+
+def foreign_imports(root, pkg):
+    """{relative path: sorted third-party top-level modules} for every .py file in the project."""
+    import ast
+    local = {pkg, "pytest", "tests", "conftest", "_pytest"}
+    local |= {p.stem for p in root.rglob("*.py")} | {p.name for p in root.iterdir() if p.is_dir()}
+    found = {}
+    for p in sorted(root.rglob("*.py")):
+        if "__pycache__" in p.parts:
+            continue
+        try:
+            tree = ast.parse(p.read_text(encoding="utf-8"))
+        except SyntaxError:
+            continue  # pytest will report it
+        mods = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                mods |= {a.name.split(".")[0] for a in node.names}
+            elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+                mods.add(node.module.split(".")[0])
+        bad = sorted(m for m in mods if m not in sys.stdlib_module_names and m not in local)
+        if bad:
+            found[p.relative_to(root).as_posix()] = bad
+    return found
+
+
+def purge_foreign_imports(root, pkg, args, tries=2):
+    """Ask for a targeted, one-file rewrite of anything importing third-party packages."""
+    for _ in range(tries):
+        bad = foreign_imports(root, pkg)
+        if not bad:
+            return {}
+        for rel, mods in bad.items():
+            code = (root / rel).read_text(encoding="utf-8")
+            try:
+                ask_and_apply(root, STDLIB_PROMPT.format(mods=", ".join(mods), rel=rel, code=code), args, 0.2)
+            except Exception:
+                pass
+    return foreign_imports(root, pkg)
+
+
 def ask_and_apply(root, prompt, args, temperature):
     """One model call; if the reply cannot be parsed, ask once more with the error attached."""
     reply = llm.chat(prompt, args.model, args.rpm, temperature=temperature)
@@ -231,7 +282,10 @@ def build_one(reg, slug, args, sandbox):
         return "failed"
 
     for it in range(1, args.max_iters + 1):
+        leftover = purge_foreign_imports(root, pkg, args)
         passed, failed, out = run_tests(root, sandbox)
+        if leftover:
+            history.append({"iter": it, "foreign_imports": leftover})
         history.append({"iter": it, "passed": passed, "failed": failed})
         print(f"    iter {it}: {passed} passed, {failed} failed")
         if failed == 0 and passed >= args.min_tests:
