@@ -21,7 +21,20 @@ see scripts/train_and_sample.sh.
 """
 
 import importlib
+import os
 import sys
+from pathlib import Path
+
+
+def load_dotenv(path=Path(__file__).with_name(".env")):
+    """Read KEY=value lines from .env into the environment; real env vars win."""
+    if not path.is_file():
+        return
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if line and not line.startswith("#") and "=" in line:
+            k, v = line.split("=", 1)
+            os.environ.setdefault(k.strip(), v.strip().strip('"').strip("'"))
 
 COMMANDS = {
     "collect": "uncharted.collect",
@@ -41,6 +54,7 @@ def main():
     if len(sys.argv) < 2 or sys.argv[1] not in COMMANDS:
         print(__doc__)
         sys.exit(0 if len(sys.argv) < 2 else 1)
+    load_dotenv()
     importlib.import_module(COMMANDS[sys.argv[1]]).main(sys.argv[2:])
 
 

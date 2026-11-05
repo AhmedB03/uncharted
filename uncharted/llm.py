@@ -43,9 +43,11 @@ def chat(prompt, model=None, rpm=8, max_tokens=8000, temperature=0.4, system=Non
         except Exception as e:  # 429s, timeouts, overloaded
             last = e
             msg = str(e).lower()
-            if "quota" in msg and "day" in msg:
-                raise SystemExit("Daily free tier quota used up. It resets at midnight Pacific; rerun then "
-                                 "and finished work is skipped.") from e
+            daily = ("quota" in msg and "day" in msg) or "per day" in msg or "(tpd)" in msg or "(rpd)" in msg
+            if daily:
+                # Exit instead of failing: otherwise every remaining build is recorded as a model failure.
+                raise SystemExit(f"Daily free tier limit used up for {model}. Rerun after it resets; finished "
+                                 "work is skipped.") from e
         time.sleep(min(120, 5 * 2 ** attempt))
     raise RuntimeError(f"LLM call failed after retries: {last}")
 
