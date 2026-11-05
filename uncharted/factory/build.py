@@ -36,8 +36,22 @@ Layout rules:
 - Python 3.11 standard library only. No network, no files outside a temp directory.
 - Real, working code. No TODOs, no placeholders, no stubs.
 
-Return only JSON mapping each file path to its full contents:
-{{"files": {{"{pkg}/__init__.py": "...", "tests/test_{pkg}.py": "..."}}}}"""
+""" + "{format}"
+
+FILE_FORMAT = """Return every file as a block in exactly this format, with nothing else around it:
+
+===== FILE: {pkg}/__init__.py =====
+<full contents>
+===== FILE: tests/test_{pkg}.py =====
+<full contents>
+===== END ====="""
+
+FIX_FORMAT = """Return the full new contents of every file you change, in exactly this format:
+
+===== FILE: path/to/file.py =====
+<full contents>
+===== END =====
+To delete a file, add a line `===== DELETE: path =====` before END."""
 
 FIX_PROMPT = """Your project fails its tests. Fix the CODE so the tests pass. Only change a test
 if the test itself is wrong about what the spec asks for; never weaken a test to make it pass.
@@ -48,11 +62,52 @@ SPEC:
 CURRENT FILES:
 {files}
 
-PYTEST OUTPUT (truncated):
+{hints}PYTEST OUTPUT (truncated):
 {output}
 
-Return only JSON with the full new contents of every file you change:
-{{"files": {{"path": "full contents"}}, "delete": []}}"""
+""" + "{format}"
+
+FILE_RE = re.compile(r"^=====\s*(FILE|DELETE):\s*(\S+?)\s*=====\s*$", re.M)
+END_RE = re.compile(r"^=====\s*END\s*=====\s*$", re.M)
+
+
+def parse_files(reply):
+    """Return (files, deletes) from a reply in file-block format, falling back to JSON.
+
+    Small local models routinely break JSON when code contains quotes or backslashes,
+    so the prompts ask for plain delimited blocks; JSON is still accepted.
+    """
+    marks = list(FILE_RE.finditer(reply))
+    if marks:
+        end = END_RE.search(reply, marks[-1].end())
+        files, deletes = {}, []
+        for i, m in enumerate(marks):
+            if m.group(1) == "DELETE":
+                deletes.append(m.group(2))
+                continue
+            stop = marks[i + 1].start() if i + 1 < len(marks) else (end.start() if end else len(reply))
+            body = reply[m.end():stop].strip("\n")
+            fence = re.fullmatch(r"```[\w+-]*\n(.*?)\n?```\s*", body, re.S)
+            files[m.group(2)] = fence.group(1) if fence else body
+        return files, deletes
+    data = llm.parse_json(reply)
+    return data.get("files") or {}, data.get("delete") or []
+
+
+def stdlib_hints(out, pkg):
+    """Plain-language hints for the failures small models keep missing in raw pytest output."""
+    hints = []
+    for mod in sorted(set(re.findall(r"No module named '([\w.]+)'", out))):
+        top = mod.split(".")[0]
+        if top == pkg:
+            hints.append(f"- `{mod}` does not exist: create that module or fix the import.")
+        elif top not in sys.stdlib_module_names and top != "pytest":
+            hints.append(f"- `{top}` is NOT in the Python standard library and is not installed. Remove every "
+                         f"use of it and rewrite that code with the standard library only.")
+    if "error collecting" in out.lower() or "errors during collection" in out.lower():
+        hints.append("- The test file could not even be imported, so ZERO tests ran. Fix the import/syntax "
+                     "error first.")
+    return ("HINTS:\n" + "\n".join(hints) + "\n\n") if hints else ""
 
 
 def pkg_name(slug):
@@ -69,15 +124,16 @@ def safe_path(root, rel):
 
 
 def apply(root, reply):
-    data = llm.parse_json(reply)
-    files = data.get("files") or {}
+    files, deletes = parse_files(reply)
     if not isinstance(files, dict) or not files:
         raise ValueError("reply had no files")
+    for rel in files:
+        safe_path(root, rel)  # validate every path before writing any
     for rel, content in files.items():
         p = safe_path(root, rel)
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(content if content.endswith("\n") else content + "\n", encoding="utf-8")
-    for rel in data.get("delete") or []:
+    for rel in deletes:
         p = safe_path(root, rel)
         if p.is_file():
             p.unlink()
@@ -113,7 +169,11 @@ def run_tests(root, sandbox, timeout=180):
     else:
         cmd = [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "tests"]
         env = {"PATH": os.environ.get("PATH", ""), "PYTHONDONTWRITEBYTECODE": "1",
-               "HOME": str(root.resolve())}
+               "HOME": str(root.resolve()), "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1"}
+        # Windows cannot start sockets/asyncio without these; a bare env makes every run "fail".
+        for k in ("SYSTEMROOT", "WINDIR", "TEMP", "TMP"):
+            if k in os.environ:
+                env[k] = os.environ[k]
         cwd = root
     try:
         r = subprocess.run(cmd, cwd=cwd, env=env, capture_output=True, text=True, timeout=timeout)
@@ -140,6 +200,19 @@ def loc(root):
                for p in root.rglob("*.py") if "__pycache__" not in p.parts and "tests" not in p.parts)
 
 
+def ask_and_apply(root, prompt, args, temperature):
+    """One model call; if the reply cannot be parsed, ask once more with the error attached."""
+    reply = llm.chat(prompt, args.model, args.rpm, temperature=temperature)
+    try:
+        return apply(root, reply)
+    except ValueError as e:
+        if "outside the project" in str(e) or "odd file name" in str(e):
+            raise
+        retry = (prompt + f"\n\nYour previous reply could not be parsed ({e}). Reply again using EXACTLY "
+                 "the file block format above, with no other text.")
+        return apply(root, llm.chat(retry, args.model, args.rpm, temperature=temperature))
+
+
 def build_one(reg, slug, args, sandbox):
     idea = reg.ideas[slug]
     spec = json.dumps(idea["spec"], indent=2)
@@ -149,10 +222,12 @@ def build_one(reg, slug, args, sandbox):
         shutil.rmtree(root)
     root.mkdir(parents=True)
     history = []
+    prompt = WRITE_PROMPT.format(spec=spec, pkg=pkg, format=FILE_FORMAT.format(pkg=pkg))
     try:
-        apply(root, llm.chat(WRITE_PROMPT.format(spec=spec, pkg=pkg), args.model, args.rpm, temperature=0.3))
+        ask_and_apply(root, prompt, args, temperature=0.3)
     except Exception as e:
-        reg.update(slug, status="failed", fail_reason=f"first draft: {e}"[:300], iterations=0)
+        reg.update(slug, status="failed", fail_reason=f"first draft: {e}"[:300], iterations=0,
+                   build_model=args.model)
         return "failed"
 
     for it in range(1, args.max_iters + 1):
@@ -172,8 +247,9 @@ def build_one(reg, slug, args, sandbox):
         if it == args.max_iters:
             break
         try:
-            apply(root, llm.chat(FIX_PROMPT.format(spec=spec, files=snapshot(root), output=out[-6000:]),
-                                 args.model, args.rpm, temperature=0.2))
+            ask_and_apply(root, FIX_PROMPT.format(spec=spec, files=snapshot(root), output=out[-6000:],
+                                                  hints=stdlib_hints(out, pkg), format=FIX_FORMAT),
+                          args, temperature=0.2)
         except Exception as e:
             history.append({"iter": it, "error": str(e)[:200]})
     reg.update(slug, status="failed", iterations=len(history), history=history, package=pkg,

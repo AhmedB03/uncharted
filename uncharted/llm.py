@@ -50,4 +50,12 @@ def parse_json(text):
     raw = fence.group(1) if fence else text[text.find("{"): text.rfind("}") + 1]
     if not raw:
         raise ValueError("no JSON object in reply")
-    return json.loads(raw)
+    try:
+        return json.loads(raw, strict=False)  # strict=False: allow raw newlines/tabs inside strings
+    except json.JSONDecodeError as first:
+        # Common small-model slips: trailing commas, smart quotes around keys.
+        fixed = re.sub(r",\s*([}\]])", r"\1", raw).replace("“", '"').replace("”", '"')
+        try:
+            return json.loads(fixed, strict=False)
+        except json.JSONDecodeError:
+            raise ValueError(f"reply was not valid JSON: {first}") from first

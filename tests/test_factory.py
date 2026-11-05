@@ -95,6 +95,48 @@ def test_refuses_paths_outside_project(tmp_path):
         build.apply(tmp_path, json.dumps({"files": {"/etc/passwd": "x"}}))
 
 
+def test_file_block_replies_are_parsed(tmp_path):
+    reply = ('Sure!\n===== FILE: pkg/__init__.py =====\nx = "a \\"quoted\\" {brace}"\n'
+             "===== FILE: tests/test_pkg.py =====\n```python\nimport pkg\n```\n"
+             "===== DELETE: old.py =====\n===== END =====\nthanks")
+    files, deletes = build.parse_files(reply)
+    assert files == {"pkg/__init__.py": 'x = "a \\"quoted\\" {brace}"', "tests/test_pkg.py": "import pkg"}
+    assert deletes == ["old.py"]
+    build.apply(tmp_path, reply)
+    assert (tmp_path / "pkg" / "__init__.py").read_text().startswith('x = "a')
+
+
+def test_hints_flag_non_stdlib_imports():
+    out = "ERROR collecting tests/test_x.py\nE   ModuleNotFoundError: No module named 'pandas'"
+    hints = build.stdlib_hints(out, "x")
+    assert "pandas" in hints and "standard library" in hints and "ZERO tests ran" in hints
+    assert build.stdlib_hints("No module named 'json'", "x") == ""
+
+
+def test_parse_json_tolerates_trailing_commas():
+    assert llm.parse_json('here: {"a": [1, 2,], "b": "line1\nline2",}') == {"a": [1, 2], "b": "line1\nline2"}
+
+
+def test_benchmark_common_triplets_come_from_real_repos(tmp_path):
+    from uncharted.factory import benchmark
+    clusters = tmp_path / "c.json"
+    clusters.write_text(json.dumps({"clusters": {}, "atom_assignments": (
+        [{"text": "t", "paper_id": "o__a", "cluster": c} for c in (0, 1, 2, 3)]
+        + [{"text": "t", "paper_id": "o__b", "cluster": c} for c in (0, 1, 2)]
+        + [{"text": "t", "paper_id": "o__c", "cluster": c} for c in (5, 6)])}))
+    got = benchmark.common_triplets(clusters, 10, exclude=[[1, 2, 3]])
+    triples = {tuple(t) for t, _ in got}
+    assert triples == {(0, 1, 2), (0, 1, 3), (0, 2, 3)}  # (1,2,3) excluded, repo c too small
+    assert dict((tuple(t), s) for t, s in got)[(0, 1, 2)] == 2  # shared by repos a and b
+
+
+def test_fisher_one_sided():
+    from uncharted.factory import benchmark
+    assert benchmark.fisher_one_sided(5, 0, 0, 5) < 0.01
+    assert benchmark.fisher_one_sided(0, 5, 5, 0) == 1.0
+    assert abs(benchmark.fisher_one_sided(3, 2, 2, 3) - 0.5) < 0.01
+
+
 def test_trivial_tests_are_rejected(tmp_path):
     (tmp_path / "tests").mkdir()
     (tmp_path / "tests" / "test_x.py").write_text("import pkg\ndef test(): assert True\n")
