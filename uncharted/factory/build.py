@@ -176,7 +176,8 @@ def run_tests(root, sandbox, timeout=180):
                 env[k] = os.environ[k]
         cwd = root
     try:
-        r = subprocess.run(cmd, cwd=cwd, env=env, capture_output=True, text=True, timeout=timeout)
+        r = subprocess.run(cmd, cwd=cwd, env=env, capture_output=True, text=True, timeout=timeout,
+                           encoding="utf-8", errors="replace")
         out = r.stdout + r.stderr
     except subprocess.TimeoutExpired:
         return 0, 1, f"Tests timed out after {timeout}s (infinite loop or blocking input?)"

@@ -55,6 +55,9 @@ def main():
         print(__doc__)
         sys.exit(0 if len(sys.argv) < 2 else 1)
     load_dotenv()
+    for stream in (sys.stdout, sys.stderr):  # Windows consoles are cp1252; model text often is not
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(errors="replace")
     importlib.import_module(COMMANDS[sys.argv[1]]).main(sys.argv[2:])
 
 
