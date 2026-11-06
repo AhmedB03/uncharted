@@ -34,8 +34,10 @@ def chat(prompt, model=None, rpm=8, max_tokens=8000, temperature=0.4, system=Non
                 # Ollama defaults to a 4096 token window and silently truncates past it, which
                 # cuts the spec/files/pytest output out of fix prompts.
                 extra["num_ctx"] = int(os.environ.get("UNCHARTED_NUM_CTX", "16384"))
+            # Without a timeout one stalled provider connection blocks the whole run for 10+ minutes.
+            timeout = float(os.environ.get("UNCHARTED_LLM_TIMEOUT", "1800" if model.startswith("ollama") else "240"))
             r = completion(model=model, messages=messages, max_tokens=max_tokens, temperature=temperature,
-                           **extra)
+                           timeout=timeout, **extra)
             text = r.choices[0].message.content or ""
             if text.strip():
                 return text
