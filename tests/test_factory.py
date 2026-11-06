@@ -161,3 +161,18 @@ def test_trivial_tests_are_rejected(tmp_path):
     (tmp_path / "tests").mkdir()
     (tmp_path / "tests" / "test_x.py").write_text("import pkg\ndef test(): assert True\n")
     assert not build.tests_look_real(tmp_path, "pkg")
+
+
+def test_registry_parallel_processes_keep_each_others_updates(tmp_path):
+    """Parallel benchmark builds are separate processes writing one registry.json."""
+    import subprocess
+    root = Path(__file__).resolve().parents[1]
+    code = ("import sys; sys.path.insert(0, sys.argv[1]); from uncharted.factory.registry import Registry\n"
+            "for i in range(15):\n"
+            "    Registry(sys.argv[2]).update(f'{sys.argv[3]}-{i}', status='built')\n")
+    procs = [subprocess.Popen([sys.executable, "-c", code, str(root), str(tmp_path), f"w{w}"])
+             for w in range(4)]
+    assert all(p.wait(timeout=120) == 0 for p in procs)
+    ideas = registry.Registry(tmp_path).ideas
+    assert len(ideas) == 60
+    assert not list(tmp_path.glob("*.lock")) and not list(tmp_path.glob("*.tmp"))

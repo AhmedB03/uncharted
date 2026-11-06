@@ -16,8 +16,13 @@ so it never mixes with the publishable factory output. Every step is resumable.
 import argparse
 import itertools
 import json
+import os
 import random
+import subprocess
+import sys
+import threading
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from math import comb
 from pathlib import Path
 
@@ -142,6 +147,7 @@ def main(argv=None):
     p.add_argument("--model", default=llm.DEFAULT_MODEL)
     p.add_argument("--rpm", type=int, default=8)
     p.add_argument("--max-iters", type=int, default=6)
+    p.add_argument("--workers", type=int, default=1, help="Ideas built at once (paid APIs: 4 is fine)")
     p.add_argument("--sandbox", default="auto", choices=["auto", "docker", "local"])
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--report", default="results/benchmark.md")
@@ -165,12 +171,43 @@ def main(argv=None):
         # Alternate arms in the build queue for the same reason.
         by_arm = {a: [s for s in queue if reg.ideas[s].get("arm") == a] for a in ("common", "alien")}
         order = [s for pair in itertools.zip_longest(by_arm["common"], by_arm["alien"]) for s in pair if s]
+        build_all(reg, order, args)
+    report(Registry(args.out), args.report)
+
+
+def build_all(reg, order, args):
+    """Build in parallel worker processes; the time is almost all waiting on model replies."""
+    arms = {s: reg.ideas[s]["arm"] for s in order}
+    if args.workers <= 1:
         for slug in order:
-            print(f"  building [{reg.ideas[slug]['arm']}] {slug}")
+            print(f"  building [{arms[slug]}] {slug}")
             build.main(["--out", args.out, "--slug", slug, "--model", args.model, "--rpm", str(args.rpm),
                         "--max-iters", str(args.max_iters), "--sandbox", args.sandbox])
-            reg = Registry(args.out)
-    report(Registry(args.out), args.report)
+        return
+    if args.sandbox == "auto" and not build.docker_ready():
+        raise SystemExit("Parallel builds need Docker (or pass --sandbox local explicitly).")
+    root = Path(__file__).resolve().parents[2]
+    env = dict(os.environ, PYTHONUNBUFFERED="1", PYTHONIOENCODING="utf-8")
+    print_lock = threading.Lock()
+
+    def one(slug):
+        cmd = [sys.executable, str(root / "uncharted.py"), "build", "--out", str(Path(args.out).resolve()),
+               "--slug", slug, "--model", args.model, "--rpm", str(args.rpm),
+               "--max-iters", str(args.max_iters), "--sandbox", args.sandbox]
+        with print_lock:
+            print(f"  start [{arms[slug]}] {slug}", flush=True)
+        r = subprocess.run(cmd, cwd=root, env=env, capture_output=True, text=True, encoding="utf-8",
+                           errors="replace")
+        with print_lock:  # print each build's log as one block so parallel output stays readable
+            print(f"  ===== [{arms[slug]}] {slug} (exit {r.returncode}) =====")
+            print((r.stdout + r.stderr).rstrip(), flush=True)
+        return r.returncode
+
+    with ThreadPoolExecutor(args.workers) as pool:
+        codes = list(pool.map(one, order))
+    if any(codes):
+        # A non-zero exit is usually the daily-limit SystemExit; finished builds are kept.
+        print(f"{sum(1 for c in codes if c)} build process(es) exited with an error; rerun to resume.")
 
 
 if __name__ == "__main__":
