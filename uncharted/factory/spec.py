@@ -42,12 +42,42 @@ Return only JSON:
   "features": ["3 to 6 concrete features"],
   "usage": "example command or code a user would run",
   "tests": ["5 to 10 specific behaviors the test suite must check"]
-}}"""
+}}
+
+Each entry in "tests" must be a concrete input -> expected output check a unit test can assert
+exactly (e.g. "merging {{a:1}} and {{a:2}} gives {{a:3}}"). Never list performance, "handles large
+inputs", real-time updates, logging, "no network access", or "uses only the standard library":
+those cannot be asserted."""
 
 
 def slugify(s):
     s = re.sub(r"[^a-z0-9]+", "-", s.lower()).strip("-")
     return s[:40].strip("-") or "alien-project"
+
+
+def write_spec(reg, cluster_ids, names, repos, model, rpm, **extra):
+    """Spec one combination into the registry. Returns (slug, status) or (None, error message)."""
+    atoms = [names.get(c, f"cluster {c}") for c in cluster_ids]
+    listing = "\n".join(
+        f"- {a}   (e.g. {', '.join(sorted(repos[c])[:3]) or 'n/a'})" for a, c in zip(atoms, cluster_ids))
+    prompt = PROMPT.format(atoms=listing)
+    try:
+        spec = llm.parse_json(llm.chat(prompt, model, rpm, max_tokens=6000))
+    except ValueError as e:  # unparseable reply: ask once more with the error attached
+        try:
+            spec = llm.parse_json(llm.chat(prompt + f"\n\nYour previous reply was not valid JSON ({e}). Reply "
+                                           "with ONLY the JSON object, double-quoted keys, no comments.",
+                                           model, rpm, max_tokens=6000))
+        except Exception as e2:
+            return None, str(e2)
+    except Exception as e:
+        return None, str(e)
+    slug = reg.unique_slug(slugify(spec.get("slug") or spec.get("title", "")))
+    status = "spec" if spec.get("feasible", True) else "infeasible"
+    reg.update(slug, status=status, atoms=atoms, cluster_ids=list(cluster_ids),
+               example_repos={a: sorted(repos[c])[:3] for a, c in zip(atoms, cluster_ids)},
+               spec=spec, spec_model=model, **extra)
+    return slug, status
 
 
 def main(argv=None):
@@ -71,26 +101,18 @@ def main(argv=None):
         atoms = [names.get(c, f"cluster {c}") for c in s["cluster_ids"]]
         if reg.has_atoms(atoms):
             continue
-        listing = "\n".join(
-            f"- {a}   (e.g. {', '.join(sorted(repos[c])[:3]) or 'n/a'})" for a, c in zip(atoms, s["cluster_ids"]))
-        try:
-            spec = llm.parse_json(llm.chat(PROMPT.format(atoms=listing), args.model, args.rpm, max_tokens=2000))
-        except Exception as e:
-            print(f"  spec failed for {atoms}: {e}")
-            continue
-        slug = reg.unique_slug(slugify(spec.get("slug") or spec.get("title", "")))
-        meta = {"atoms": atoms, "cluster_ids": s["cluster_ids"], "rank": s["rank_fused"],
-                "example_repos": {a: sorted(repos[c])[:3] for a, c in zip(atoms, s["cluster_ids"])},
-                "coherence_z": round(s["z_coherence"], 3), "unavailability_z": round(s["z_availability"], 3),
-                "spec": spec, "spec_model": args.model}
-        if not spec.get("feasible", True):
-            reg.update(slug, status="infeasible", **meta)
+        slug, status = write_spec(reg, s["cluster_ids"], names, repos, args.model, args.rpm,
+                                  rank=s["rank_fused"], coherence_z=round(s["z_coherence"], 3),
+                                  unavailability_z=round(s["z_availability"], 3))
+        if slug is None:
+            print(f"  spec failed for {atoms}: {status}")
+        elif status == "infeasible":
             skipped += 1
-            print(f"  infeasible: {' + '.join(atoms)}  ({spec.get('why_unusual') or spec.get('reason', '')})")
-            continue
-        reg.update(slug, status="spec", **meta)
-        made += 1
-        print(f"  [{made}/{args.n}] {slug}: {spec.get('pitch', '')}")
+            sp = reg.ideas[slug]["spec"]
+            print(f"  infeasible: {' + '.join(atoms)}  ({sp.get('why_unusual') or sp.get('reason', '')})")
+        else:
+            made += 1
+            print(f"  [{made}/{args.n}] {slug}: {reg.ideas[slug]['spec'].get('pitch', '')}")
     print(f"Done: {made} specs, {skipped} infeasible. Registry: {reg.path}")
 
 

@@ -95,7 +95,84 @@ def test_refuses_paths_outside_project(tmp_path):
         build.apply(tmp_path, json.dumps({"files": {"/etc/passwd": "x"}}))
 
 
+def test_file_block_replies_are_parsed(tmp_path):
+    reply = ('Sure!\n===== FILE: pkg/__init__.py =====\nx = "a \\"quoted\\" {brace}"\n'
+             "===== FILE: tests/test_pkg.py =====\n```python\nimport pkg\n```\n"
+             "===== DELETE: old.py =====\n===== END =====\nthanks")
+    files, deletes = build.parse_files(reply)
+    assert files == {"pkg/__init__.py": 'x = "a \\"quoted\\" {brace}"', "tests/test_pkg.py": "import pkg"}
+    assert deletes == ["old.py"]
+    build.apply(tmp_path, reply)
+    assert (tmp_path / "pkg" / "__init__.py").read_text().startswith('x = "a')
+
+
+def test_hints_flag_non_stdlib_imports():
+    out = "ERROR collecting tests/test_x.py\nE   ModuleNotFoundError: No module named 'pandas'"
+    hints = build.stdlib_hints(out, "x")
+    assert "pandas" in hints and "standard library" in hints and "ZERO tests ran" in hints
+    assert build.stdlib_hints("No module named 'json'", "x") == ""
+
+
+def test_foreign_imports_detected_and_purged(tmp_path, monkeypatch):
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "pkg" / "__init__.py").write_text("from .core import f\n")
+    (tmp_path / "pkg" / "core.py").write_text("import json, os\nimport markdown\nfrom aiohttp import web\n"
+                                              "def f():\n    return 1\n")
+    (tmp_path / "tests" / "test_pkg.py").write_text("import pytest\nfrom pkg import f\nfrom pkg.core import f\n")
+    assert build.foreign_imports(tmp_path, "pkg") == {"pkg/core.py": ["aiohttp", "markdown"]}
+
+    def rewrite(prompt, *a, **k):
+        assert "markdown" in prompt and "===== FILE: pkg/core.py =====" in prompt
+        return "===== FILE: pkg/core.py =====\nimport json\ndef f():\n    return 1\n===== END ====="
+    monkeypatch.setattr(llm, "chat", rewrite)
+
+    class A:
+        model, rpm = "x", 999
+    assert build.purge_foreign_imports(tmp_path, "pkg", A) == {}
+    assert "markdown" not in (tmp_path / "pkg" / "core.py").read_text()
+
+
+def test_parse_json_tolerates_trailing_commas():
+    assert llm.parse_json('here: {"a": [1, 2,], "b": "line1\nline2",}') == {"a": [1, 2], "b": "line1\nline2"}
+
+
+def test_benchmark_common_triplets_come_from_real_repos(tmp_path):
+    from uncharted.factory import benchmark
+    clusters = tmp_path / "c.json"
+    clusters.write_text(json.dumps({"clusters": {}, "atom_assignments": (
+        [{"text": "t", "paper_id": "o__a", "cluster": c} for c in (0, 1, 2, 3)]
+        + [{"text": "t", "paper_id": "o__b", "cluster": c} for c in (0, 1, 2)]
+        + [{"text": "t", "paper_id": "o__c", "cluster": c} for c in (5, 6)])}))
+    got = benchmark.common_triplets(clusters, 10, exclude=[[1, 2, 3]])
+    triples = {tuple(t) for t, _ in got}
+    assert triples == {(0, 1, 2), (0, 1, 3), (0, 2, 3)}  # (1,2,3) excluded, repo c too small
+    assert dict((tuple(t), s) for t, s in got)[(0, 1, 2)] == 2  # shared by repos a and b
+
+
+def test_fisher_one_sided():
+    from uncharted.factory import benchmark
+    assert benchmark.fisher_one_sided(5, 0, 0, 5) < 0.01
+    assert benchmark.fisher_one_sided(0, 5, 5, 0) == 1.0
+    assert abs(benchmark.fisher_one_sided(3, 2, 2, 3) - 0.5) < 0.01
+
+
 def test_trivial_tests_are_rejected(tmp_path):
     (tmp_path / "tests").mkdir()
     (tmp_path / "tests" / "test_x.py").write_text("import pkg\ndef test(): assert True\n")
     assert not build.tests_look_real(tmp_path, "pkg")
+
+
+def test_registry_parallel_processes_keep_each_others_updates(tmp_path):
+    """Parallel benchmark builds are separate processes writing one registry.json."""
+    import subprocess
+    root = Path(__file__).resolve().parents[1]
+    code = ("import sys; sys.path.insert(0, sys.argv[1]); from uncharted.factory.registry import Registry\n"
+            "for i in range(15):\n"
+            "    Registry(sys.argv[2]).update(f'{sys.argv[3]}-{i}', status='built')\n")
+    procs = [subprocess.Popen([sys.executable, "-c", code, str(root), str(tmp_path), f"w{w}"])
+             for w in range(4)]
+    assert all(p.wait(timeout=120) == 0 for p in procs)
+    ideas = registry.Registry(tmp_path).ideas
+    assert len(ideas) == 60
+    assert not list(tmp_path.glob("*.lock")) and not list(tmp_path.glob("*.tmp"))

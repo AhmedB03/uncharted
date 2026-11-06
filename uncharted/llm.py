@@ -29,7 +29,15 @@ def chat(prompt, model=None, rpm=8, max_tokens=8000, temperature=0.4, system=Non
             time.sleep(wait)
         _last_call[0] = time.time()
         try:
-            r = completion(model=model, messages=messages, max_tokens=max_tokens, temperature=temperature)
+            extra = {}
+            if model.startswith(("ollama/", "ollama_chat/")):
+                # Ollama defaults to a 4096 token window and silently truncates past it, which
+                # cuts the spec/files/pytest output out of fix prompts.
+                extra["num_ctx"] = int(os.environ.get("UNCHARTED_NUM_CTX", "16384"))
+            # Without a timeout one stalled provider connection blocks the whole run for 10+ minutes.
+            timeout = float(os.environ.get("UNCHARTED_LLM_TIMEOUT", "1800" if model.startswith("ollama") else "240"))
+            r = completion(model=model, messages=messages, max_tokens=max_tokens, temperature=temperature,
+                           timeout=timeout, **extra)
             text = r.choices[0].message.content or ""
             if text.strip():
                 return text
@@ -37,9 +45,11 @@ def chat(prompt, model=None, rpm=8, max_tokens=8000, temperature=0.4, system=Non
         except Exception as e:  # 429s, timeouts, overloaded
             last = e
             msg = str(e).lower()
-            if "quota" in msg and "day" in msg:
-                raise SystemExit("Daily free tier quota used up. It resets at midnight Pacific; rerun then "
-                                 "and finished work is skipped.") from e
+            daily = ("quota" in msg and "day" in msg) or "per day" in msg or "(tpd)" in msg or "(rpd)" in msg
+            if daily:
+                # Exit instead of failing: otherwise every remaining build is recorded as a model failure.
+                raise SystemExit(f"Daily free tier limit used up for {model}. Rerun after it resets; finished "
+                                 "work is skipped.") from e
         time.sleep(min(120, 5 * 2 ** attempt))
     raise RuntimeError(f"LLM call failed after retries: {last}")
 
@@ -50,4 +60,12 @@ def parse_json(text):
     raw = fence.group(1) if fence else text[text.find("{"): text.rfind("}") + 1]
     if not raw:
         raise ValueError("no JSON object in reply")
-    return json.loads(raw)
+    try:
+        return json.loads(raw, strict=False)  # strict=False: allow raw newlines/tabs inside strings
+    except json.JSONDecodeError as first:
+        # Common small-model slips: trailing commas, smart quotes around keys.
+        fixed = re.sub(r",\s*([}\]])", r"\1", raw).replace("“", '"').replace("”", '"')
+        try:
+            return json.loads(fixed, strict=False)
+        except json.JSONDecodeError:
+            raise ValueError(f"reply was not valid JSON: {first}") from first
