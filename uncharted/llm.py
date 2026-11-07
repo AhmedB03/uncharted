@@ -34,6 +34,10 @@ def chat(prompt, model=None, rpm=8, max_tokens=8000, temperature=0.4, system=Non
                 # Ollama defaults to a 4096 token window and silently truncates past it, which
                 # cuts the spec/files/pytest output out of fix prompts.
                 extra["num_ctx"] = int(os.environ.get("UNCHARTED_NUM_CTX", "16384"))
+            if model.startswith("openrouter/") and os.environ.get("UNCHARTED_REASONING", "off") != "on":
+                # DeepSeek v4 and Claude Haiku 5.5 think by default on OpenRouter, and on a full build
+                # prompt the hidden reasoning used all of max_tokens, leaving the reply empty.
+                extra["extra_body"] = {"reasoning": {"enabled": False}}
             # Without a timeout one stalled provider connection blocks the whole run for 10+ minutes.
             timeout = float(os.environ.get("UNCHARTED_LLM_TIMEOUT", "1800" if model.startswith("ollama") else "240"))
             r = completion(model=model, messages=messages, max_tokens=max_tokens, temperature=temperature,
@@ -41,7 +45,9 @@ def chat(prompt, model=None, rpm=8, max_tokens=8000, temperature=0.4, system=Non
             text = r.choices[0].message.content or ""
             if text.strip():
                 return text
-            last = RuntimeError("empty reply")
+            out_of_room = getattr(r.choices[0], "finish_reason", None) == "length"
+            last = RuntimeError("empty reply: max_tokens used up before any answer (hidden reasoning?)"
+                                if out_of_room else "empty reply")
         except Exception as e:  # 429s, timeouts, overloaded
             last = e
             msg = str(e).lower()
