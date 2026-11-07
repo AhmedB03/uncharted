@@ -10,6 +10,10 @@ DEFAULT_MODEL = os.environ.get("UNCHARTED_MODEL", "gemini/gemini-3.8-flash")
 _last_call = [0.0]
 
 
+class ContentFiltered(RuntimeError):
+    """The provider refused the prompt outright; the same prompt will be refused again."""
+
+
 def chat(prompt, model=None, rpm=8, max_tokens=8000, temperature=0.4, system=None):
     """Send one prompt, return the reply text.
 
@@ -45,9 +49,14 @@ def chat(prompt, model=None, rpm=8, max_tokens=8000, temperature=0.4, system=Non
             text = r.choices[0].message.content or ""
             if text.strip():
                 return text
+            if getattr(r.choices[0], "finish_reason", None) == "content_filter":
+                # The provider's filter blocks the same prompt every time; retrying only burns minutes.
+                raise ContentFiltered(f"{model} content filter blocked this prompt")
             out_of_room = getattr(r.choices[0], "finish_reason", None) == "length"
             last = RuntimeError("empty reply: max_tokens used up before any answer (hidden reasoning?)"
                                 if out_of_room else "empty reply")
+        except ContentFiltered:
+            raise
         except Exception as e:  # 429s, timeouts, overloaded
             last = e
             msg = str(e).lower()

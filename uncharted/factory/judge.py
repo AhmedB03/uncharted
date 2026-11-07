@@ -88,8 +88,30 @@ Reply with only a JSON object:
   "novelty": n, "usefulness": n, "ambition": n, "integration": n, "realness": n,
   "verdict": "<one sentence>"}}"""
 
+COMBO_DIMENSIONS = ("novelty", "coherence", "potential")
 
-def prompt_for(idea, root, specs=False):
+COMBO_PROMPT = """Someone proposes a software project that combines these three techniques:
+
+{atoms}
+
+Nothing else is decided yet. Score the combination itself from 1 to 5 using the anchors.
+
+novelty    1 = plenty of well known projects already combine all three; 3 = it exists but is uncommon;
+           5 = you know of nothing that combines them
+coherence  1 = the three have nothing to do with each other; 3 = two fit, the third is a stretch;
+           5 = they fit together naturally
+potential  1 = no worthwhile project could come of it; 3 = a decent niche tool;
+           5 = it could become a genuinely new and useful project
+
+Reply with only a JSON object:
+{{"closest_existing": "<the most similar real project you know, or none>",
+  "novelty": n, "coherence": n, "potential": n,
+  "verdict": "<one sentence: the best project this combination could become>"}}"""
+
+
+def prompt_for(idea, root, specs=False, combos=False):
+    if combos:  # deliberately only the technique names: no spec, no example repos, no arm
+        return COMBO_PROMPT.format(atoms="\n".join(f"- {a}" for a in idea["atoms"]))
     s = idea["spec"]
     fields = dict(title=s.get("title", ""), pitch=s.get("pitch", ""), kind=s.get("kind", ""),
                   features="\n".join(f"- {f}" for f in s.get("features", [])), usage=s.get("usage", ""))
@@ -99,10 +121,10 @@ def prompt_for(idea, root, specs=False):
 
 
 def judge_one(idea, root, args):
-    dims = SPEC_DIMENSIONS if args.specs else DIMENSIONS
+    dims = dims_for(args)
     last = None
     for _ in range(3):
-        reply = llm.chat(prompt_for(idea, root, args.specs), model=args.model, rpm=args.rpm, max_tokens=8000,
+        reply = llm.chat(prompt_for(idea, root, args.specs, args.combos), model=args.model, rpm=args.rpm, max_tokens=8000,
                          temperature=0.0, system=SYSTEM)
         try:
             out = llm.parse_json(reply)
@@ -142,9 +164,12 @@ def mann_whitney_p(x, y):
     return round(2 * (1 - 0.5 * (1 + erf(abs(z) / sqrt(2)))), 4)
 
 
-def report(rows, model, out_md, dims=DIMENSIONS, specs=False):
+def dims_for(args):
+    return COMBO_DIMENSIONS if args.combos else SPEC_DIMENSIONS if args.specs else DIMENSIONS
+
+
+def report(rows, model, out_md, dims=DIMENSIONS, what="built projects (code)", filtered=()):
     arms = {a: [r for r in rows if r["arm"] == a] for a in ("common", "alien")}
-    what = "specs (plan only, no code; every attempted idea)" if specs else "built projects (code)"
     lines = [f"# Blind quality judge: common vs alien, {what}", "", f"Judge: {model}", "",
              "The judge never saw the arm, the atoms or the spec's 'why unusual' text. Scores 1-5.", "",
              "| dimension | common mean | alien mean | alien - common | Mann-Whitney p (two-sided) |",
@@ -159,7 +184,8 @@ def report(rows, model, out_md, dims=DIMENSIONS, specs=False):
         summary[d] = {"common": round(statistics.mean(c), 2), "alien": round(statistics.mean(a), 2), "p": p}
         lines.append(f"| {d} | {summary[d]['common']} | {summary[d]['alien']} "
                      f"| {summary[d]['alien'] - summary[d]['common']:+.2f} | {p} |")
-    lines += ["", f"Judged: common {len(arms['common'])}, alien {len(arms['alien'])} .",
+    lines += ["", f"Judged: common {len(arms['common'])}, alien {len(arms['alien'])}. Blocked by the provider's content "
+              f"filter (excluded): common {list(filtered).count('common')}, alien {list(filtered).count('alien')}.",
               "Five tests on the same projects: treat p < 0.01 as the bar, not 0.05.", "",
               "## Projects", "", "| arm | slug | " + " | ".join(dims) + " | closest existing | verdict |",
               "| --- | --- | " + " | ".join("---" for _ in dims) + " | --- | --- |"]
@@ -188,23 +214,29 @@ def main(argv=None):
                    help="Sonnet 5.5 on OpenRouter refuses requests with reasoning off; thinking also helps judging")
     p.add_argument("--specs", action="store_true",
                    help="Judge the plan only (no code), for every attempted idea including failed builds")
+    p.add_argument("--combos", action="store_true",
+                   help="Judge only the three technique names, for every specced idea")
     args = p.parse_args(argv)
-    dims = SPEC_DIMENSIONS if args.specs else DIMENSIONS
+    dims = dims_for(args)
+    what = ("technique combinations (names only; every specced idea)" if args.combos else
+            "specs (plan only, no code; every attempted idea)" if args.specs else "built projects (code)")
     os.environ["UNCHARTED_REASONING"] = args.reasoning
 
-    todo, rows, lock = [], [], threading.Lock()
+    todo, rows, filtered, lock = [], [], [], threading.Lock()
     caches = {}
     for out in args.out:
         reg = Registry(out)
-        cache_path = Path(out) / ("judge_specs.json" if args.specs else "judge.json")
+        cache_path = Path(out) / ("judge_combos.json" if args.combos else "judge_specs.json" if args.specs else "judge.json")
         cache = json.loads(cache_path.read_text(encoding="utf-8")) if cache_path.exists() else {}
         caches[out] = (cache_path, cache)
         for slug, idea in reg.ideas.items():
-            wanted = ("built", "failed") if args.specs else ("built",)
+            wanted = ("built", "failed", "infeasible", "spec") if args.combos else ("built", "failed") if args.specs else ("built",)
             if idea.get("status") not in wanted or idea.get("arm") not in ("common", "alien"):
                 continue
             key = f"{args.model}::{slug}"
-            if key in cache:
+            if key in cache and cache[key].get("filtered"):
+                filtered.append(idea["arm"])
+            elif key in cache:
                 rows.append({"out": out, "slug": slug, "arm": idea["arm"], "status": idea["status"], **cache[key]})
             else:
                 todo.append((out, slug, idea, reg.project_dir(slug)))
@@ -218,6 +250,14 @@ def main(argv=None):
         out, slug, idea, root = item
         try:
             res = judge_one(idea, root, args)
+        except llm.ContentFiltered:
+            print(f"  FILTERED {slug} (provider content filter)", flush=True)
+            with lock:
+                cache_path, cache = caches[out]
+                cache[f"{args.model}::{slug}"] = {"filtered": True}
+                cache_path.write_text(json.dumps(cache, indent=1), encoding="utf-8")
+                filtered.append(idea["arm"])
+            return
         except Exception as e:
             print(f"  FAILED {slug}: {str(e)[:150]}", flush=True)
             return
@@ -232,7 +272,7 @@ def main(argv=None):
         list(pool.map(one, todo))
     for r in rows:
         r["total"] = sum(r[d] for d in dims)
-    report(rows, args.model, args.report, dims, args.specs)
+    report(rows, args.model, args.report, dims, what, filtered)
 
 
 if __name__ == "__main__":
