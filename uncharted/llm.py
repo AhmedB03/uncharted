@@ -84,3 +84,18 @@ def parse_json(text):
             return json.loads(fixed, strict=False)
         except json.JSONDecodeError:
             raise ValueError(f"reply was not valid JSON: {first}") from first
+
+
+def openrouter_spent():
+    """Total USD used on the OpenRouter key so far, or None if it cannot be read."""
+    import json
+    import urllib.request
+    key = os.environ.get("OPENROUTER_API_KEY")
+    if not key:
+        return None
+    try:
+        req = urllib.request.Request("https://openrouter.ai/api/v1/credits",
+                                     headers={"Authorization": f"Bearer {key}"})
+        return float(json.load(urllib.request.urlopen(req, timeout=30))["data"]["total_usage"])
+    except Exception:
+        return None

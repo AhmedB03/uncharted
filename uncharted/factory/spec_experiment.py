@@ -63,7 +63,15 @@ def main(argv=None):
     p.add_argument("--max-iters", type=int, default=4)
     p.add_argument("--workers", type=int, default=6)
     p.add_argument("--report", default="results/spec_experiment.md")
+    p.add_argument("--max-spend", type=float, default=None,
+                   help="USD cap for this run (OpenRouter): specs stop at half of it, judging stops at all of it")
+    p.add_argument("--skip-spec-judge", action="store_true")
     args = p.parse_args(argv)
+    from uncharted import llm
+    start = llm.openrouter_spent() if args.max_spend else None
+    if args.max_spend and start is None:
+        raise SystemExit("--max-spend needs OPENROUTER_API_KEY and a readable credits endpoint")
+    spent = lambda: llm.openrouter_spent() - start
 
     picked = pick(args.base, args.n)
     names, repos = load_names(args.clusters)
@@ -78,6 +86,9 @@ def main(argv=None):
         for slug, idea in picked:
             if tuple(idea["cluster_ids"]) in done:
                 continue
+            if args.max_spend and spent() >= args.max_spend / 2:
+                print(f"  spec budget reached (${spent():.2f}); not writing more specs", flush=True)
+                break
             new, status = spec.write_spec(reg, idea["cluster_ids"], names, repos, model, 60,
                                           prompt_version=version, max_tokens=max_tokens,
                                           arm="alien", base_slug=slug)
@@ -88,8 +99,17 @@ def main(argv=None):
         benchmark.build_all(reg, queue, Namespace(out=out, model=args.build_model, rpm=60,
                                                   max_iters=args.max_iters, sandbox="auto",
                                                   workers=args.workers))
-        judge.main(["--specs", "--out", out, "--workers", "6", "--report", f"results/spec_exp_{v}_specs.md"])
-        judge.main(["--out", out, "--workers", "6", "--report", f"results/spec_exp_{v}_code.md"])
+        if not args.skip_spec_judge:
+            judge.main(["--specs", "--out", out, "--workers", "6", "--report", f"results/spec_exp_{v}_specs.md"])
+        limit = []
+        if args.max_spend:
+            left = args.max_spend - spent()
+            print(f"  spent ${spent():.2f} before code judging", flush=True)
+            limit = ["--limit", str(max(0, int(left / 0.06)))]  # ~$0.05 per Sonnet code judgment
+            if limit[1] == "0":
+                print("  no budget left for code judging", flush=True)
+                continue
+        judge.main(["--out", out, "--workers", "6", "--report", f"results/spec_exp_{v}_code.md"] + limit)
         os.environ["UNCHARTED_REASONING"] = "off"
 
     report(args, picked)
