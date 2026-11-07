@@ -160,6 +160,8 @@ def main(argv=None):
                    help="Model that writes specs (default: --model). Keep it fixed when extending a run.")
     p.add_argument("--support", default=None,
                    help="Pick common triples by repo support in a bigger corpus (output of `uncharted.py support`)")
+    p.add_argument("--alien-max-support", type=int, default=None,
+                   help="Keep only alien triples that at most this many repos of --support already combine")
     p.add_argument("--rpm", type=int, default=8)
     p.add_argument("--max-iters", type=int, default=6)
     p.add_argument("--workers", type=int, default=1, help="Ideas built at once (paid APIs: 4 is fine)")
@@ -173,6 +175,13 @@ def main(argv=None):
     if not args.report_only:
         names, repos = load_names(args.clusters)
         alien = alien_triplets(args.results, args.n * 3)
+        if args.alien_max_support is not None:
+            if not args.support:
+                raise SystemExit("--alien-max-support needs --support")
+            support = json.loads(Path(args.support).read_text())["triple_support"]
+            alien = [s for s in alien_triplets(args.results, 10 ** 6)
+                     if support.get(",".join(map(str, sorted(s["cluster_ids"]))), 0) <= args.alien_max_support]
+            print(f"{len(alien)} alien triples with support <= {args.alien_max_support} in {args.support}")
         alien_combos = [(s["cluster_ids"], {"rank": s["rank_fused"], "coherence_z": round(s["z_coherence"], 3),
                                             "unavailability_z": round(s["z_availability"], 3)}) for s in alien]
         taken = [s["cluster_ids"] for s in alien]
