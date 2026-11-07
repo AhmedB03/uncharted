@@ -260,9 +260,14 @@ def purge_foreign_imports(root, pkg, args, tries=2):
     return foreign_imports(root, pkg)
 
 
+# 8000 cut 800+ line projects off before their tests were written (every build then "failed"
+# with no test file). The cap only costs anything when the model actually needs the room.
+BUILD_MAX_TOKENS = int(os.environ.get("UNCHARTED_BUILD_MAX_TOKENS", "32000"))
+
+
 def ask_and_apply(root, prompt, args, temperature):
     """One model call; if the reply cannot be parsed, ask once more with the error attached."""
-    reply = llm.chat(prompt, args.model, args.rpm, temperature=temperature)
+    reply = llm.chat(prompt, args.model, args.rpm, temperature=temperature, max_tokens=BUILD_MAX_TOKENS)
     try:
         return apply(root, reply)
     except ValueError as e:
@@ -270,7 +275,8 @@ def ask_and_apply(root, prompt, args, temperature):
             raise
         retry = (prompt + f"\n\nYour previous reply could not be parsed ({e}). Reply again using EXACTLY "
                  "the file block format above, with no other text.")
-        return apply(root, llm.chat(retry, args.model, args.rpm, temperature=temperature))
+        return apply(root, llm.chat(retry, args.model, args.rpm, temperature=temperature,
+                                    max_tokens=BUILD_MAX_TOKENS))
 
 
 def build_one(reg, slug, args, sandbox):
