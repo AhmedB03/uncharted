@@ -17,3 +17,13 @@ def test_mann_whitney():
     assert judge.mann_whitney_p([1, 2, 3], [1, 2, 3]) == 1.0
     assert judge.mann_whitney_p([5] * 20, [1] * 20) < 0.001
     assert judge.mann_whitney_p([], [1]) is None
+
+
+def test_spec_prompt_is_blind_and_has_no_code(tmp_path):
+    (tmp_path / "core.py").write_text("SECRET_CODE = 1\n")
+    idea = {"arm": "alien", "atoms": ["radix tree routing"],
+            "spec": {"title": "T", "pitch": "P", "features": ["a"], "tests": ["t1"], "why_unusual": "SECRET-WHY"}}
+    text = judge.prompt_for(idea, tmp_path, specs=True)
+    assert "t1" in text
+    for leak in ("alien", "radix tree routing", "SECRET-WHY", "SECRET_CODE"):
+        assert leak not in text

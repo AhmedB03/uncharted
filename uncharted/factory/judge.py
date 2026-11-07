@@ -58,21 +58,55 @@ Reply with only a JSON object:
   "verdict": "<one sentence>"}}"""
 
 
-def prompt_for(idea, root):
+SPEC_DIMENSIONS = ("novelty", "usefulness", "ambition", "integration", "realness")
+
+SPEC_PROMPT = """Review this plan for a small Python project. No code exists yet: judge the plan itself.
+Score each dimension from 1 to 5 using the anchors.
+
+novelty      1 = a well known tool already does exactly this; 3 = a recognisable idea with a twist;
+             5 = you know of nothing that does this and the combination makes sense
+usefulness   1 = nobody would run this; 3 = handy for a niche or for learning; 5 = many people would want it
+ambition     1 = a toy any tutorial covers; 3 = a small but real tool; 5 = a non-trivial core worth building
+integration  1 = unrelated parts bolted side by side; 3 = parts interact in one place;
+             5 = the parts genuinely depend on each other to make the whole work
+realness     1 = the plan itself says its key features are simulated, mocked or stand-ins;
+             3 = some key features are real, some are simulated; 5 = every feature is meant to be real
+
+## Plan
+Title: {title}
+Pitch: {pitch}
+Kind: {kind}
+Features:
+{features}
+Usage:
+{usage}
+Tests planned:
+{tests}
+
+Reply with only a JSON object:
+{{"closest_existing": "<the most similar real project you know, or none>",
+  "novelty": n, "usefulness": n, "ambition": n, "integration": n, "realness": n,
+  "verdict": "<one sentence>"}}"""
+
+
+def prompt_for(idea, root, specs=False):
     s = idea["spec"]
-    return PROMPT.format(title=s.get("title", ""), pitch=s.get("pitch", ""), kind=s.get("kind", ""),
-                         features="\n".join(f"- {f}" for f in s.get("features", [])),
-                         usage=s.get("usage", ""), source=snapshot(root, limit=30000))
+    fields = dict(title=s.get("title", ""), pitch=s.get("pitch", ""), kind=s.get("kind", ""),
+                  features="\n".join(f"- {f}" for f in s.get("features", [])), usage=s.get("usage", ""))
+    if specs:
+        return SPEC_PROMPT.format(**fields, tests="\n".join(f"- {t}" for t in s.get("tests", [])))
+    return PROMPT.format(**fields, source=snapshot(root, limit=30000))
 
 
 def judge_one(idea, root, args):
+    dims = SPEC_DIMENSIONS if args.specs else DIMENSIONS
     last = None
     for _ in range(3):
-        reply = llm.chat(prompt_for(idea, root), model=args.model, rpm=args.rpm, max_tokens=8000,
+        reply = llm.chat(prompt_for(idea, root, args.specs), model=args.model, rpm=args.rpm, max_tokens=8000,
                          temperature=0.0, system=SYSTEM)
         try:
             out = llm.parse_json(reply)
-            scores = {d: int(out[d]) for d in DIMENSIONS}
+            scores = {d: int(out[d]) for d in dims}
             if all(1 <= v <= 5 for v in scores.values()):
                 return {**scores, "closest_existing": str(out.get("closest_existing", "")),
                         "verdict": str(out.get("verdict", ""))}
@@ -108,14 +142,15 @@ def mann_whitney_p(x, y):
     return round(2 * (1 - 0.5 * (1 + erf(abs(z) / sqrt(2)))), 4)
 
 
-def report(rows, model, out_md):
+def report(rows, model, out_md, dims=DIMENSIONS, specs=False):
     arms = {a: [r for r in rows if r["arm"] == a] for a in ("common", "alien")}
-    lines = ["# Blind quality judge: common vs alien", "", f"Judge: {model}", "",
+    what = "specs (plan only, no code; every attempted idea)" if specs else "built projects (code)"
+    lines = [f"# Blind quality judge: common vs alien, {what}", "", f"Judge: {model}", "",
              "The judge never saw the arm, the atoms or the spec's 'why unusual' text. Scores 1-5.", "",
              "| dimension | common mean | alien mean | alien - common | Mann-Whitney p (two-sided) |",
              "| --- | --- | --- | --- | --- |"]
     summary = {}
-    for d in DIMENSIONS + ("total",):
+    for d in dims + ("total",):
         c = [r[d] for r in arms["common"]]
         a = [r[d] for r in arms["alien"]]
         if not c or not a:
@@ -124,13 +159,13 @@ def report(rows, model, out_md):
         summary[d] = {"common": round(statistics.mean(c), 2), "alien": round(statistics.mean(a), 2), "p": p}
         lines.append(f"| {d} | {summary[d]['common']} | {summary[d]['alien']} "
                      f"| {summary[d]['alien'] - summary[d]['common']:+.2f} | {p} |")
-    lines += ["", f"Judged: common {len(arms['common'])}, alien {len(arms['alien'])} (built projects only).",
+    lines += ["", f"Judged: common {len(arms['common'])}, alien {len(arms['alien'])} .",
               "Five tests on the same projects: treat p < 0.01 as the bar, not 0.05.", "",
-              "## Projects", "", "| arm | slug | " + " | ".join(DIMENSIONS) + " | closest existing | verdict |",
-              "| --- | --- | " + " | ".join("---" for _ in DIMENSIONS) + " | --- | --- |"]
+              "## Projects", "", "| arm | slug | " + " | ".join(dims) + " | closest existing | verdict |",
+              "| --- | --- | " + " | ".join("---" for _ in dims) + " | --- | --- |"]
     for r in sorted(rows, key=lambda r: (r["arm"], -r["total"], r["slug"])):
         clean = lambda t: t.replace("|", "/").replace("\n", " ")
-        lines.append(f"| {r['arm']} | {r['slug']} | " + " | ".join(str(r[d]) for d in DIMENSIONS)
+        lines.append(f"| {r['arm']} | {r['slug']} | " + " | ".join(str(r[d]) for d in dims)
                      + f" | {clean(r['closest_existing'])} | {clean(r['verdict'])} |")
     Path(out_md).parent.mkdir(parents=True, exist_ok=True)
     Path(out_md).write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -151,22 +186,26 @@ def main(argv=None):
     p.add_argument("--report", default="results/judge.md")
     p.add_argument("--reasoning", default="on", choices=["on", "off"],
                    help="Sonnet 5.5 on OpenRouter refuses requests with reasoning off; thinking also helps judging")
+    p.add_argument("--specs", action="store_true",
+                   help="Judge the plan only (no code), for every attempted idea including failed builds")
     args = p.parse_args(argv)
+    dims = SPEC_DIMENSIONS if args.specs else DIMENSIONS
     os.environ["UNCHARTED_REASONING"] = args.reasoning
 
     todo, rows, lock = [], [], threading.Lock()
     caches = {}
     for out in args.out:
         reg = Registry(out)
-        cache_path = Path(out) / "judge.json"
+        cache_path = Path(out) / ("judge_specs.json" if args.specs else "judge.json")
         cache = json.loads(cache_path.read_text(encoding="utf-8")) if cache_path.exists() else {}
         caches[out] = (cache_path, cache)
         for slug, idea in reg.ideas.items():
-            if idea.get("status") != "built" or idea.get("arm") not in ("common", "alien"):
+            wanted = ("built", "failed") if args.specs else ("built",)
+            if idea.get("status") not in wanted or idea.get("arm") not in ("common", "alien"):
                 continue
             key = f"{args.model}::{slug}"
             if key in cache:
-                rows.append({"out": out, "slug": slug, "arm": idea["arm"], **cache[key]})
+                rows.append({"out": out, "slug": slug, "arm": idea["arm"], "status": idea["status"], **cache[key]})
             else:
                 todo.append((out, slug, idea, reg.project_dir(slug)))
     # Shuffle so arms interleave and a cut-off run is not biased toward one arm.
@@ -186,14 +225,14 @@ def main(argv=None):
             cache_path, cache = caches[out]
             cache[f"{args.model}::{slug}"] = res
             cache_path.write_text(json.dumps(cache, indent=1), encoding="utf-8")
-            rows.append({"out": out, "slug": slug, "arm": idea["arm"], **res})
-            print(f"  [{len(rows)}] {slug}: " + " ".join(f"{d[:3]}={res[d]}" for d in DIMENSIONS), flush=True)
+            rows.append({"out": out, "slug": slug, "arm": idea["arm"], "status": idea["status"], **res})
+            print(f"  [{len(rows)}] {slug}: " + " ".join(f"{d[:3]}={res[d]}" for d in dims), flush=True)
 
     with ThreadPoolExecutor(max(1, args.workers)) as pool:
         list(pool.map(one, todo))
     for r in rows:
-        r["total"] = sum(r[d] for d in DIMENSIONS)
-    report(rows, args.model, args.report)
+        r["total"] = sum(r[d] for d in dims)
+    report(rows, args.model, args.report, dims, args.specs)
 
 
 if __name__ == "__main__":
