@@ -15,6 +15,7 @@ The alien factory:
     publish     Ship passing projects to GitHub, labeled as AI made (dry run by default)
     gallery     Static page of everything made, ranked by stars
     benchmark   Common vs alien: same model, same loop, compare build success
+    support     Count how many repos of a bigger corpus share each technique triple
     judge       Blind quality scores for benchmark builds (novelty, substance, ...)
 
 Steps 2 and 3 reuse the original Alien training and sampling code unchanged;
@@ -43,6 +44,7 @@ COMMANDS = {
     "cluster": "uncharted.cluster",
     "build-db": "uncharted.build_db",
     "show": "uncharted.show",
+    "support": "uncharted.support",
     "spec": "uncharted.factory.spec",
     "build": "uncharted.factory.build",
     "publish": "uncharted.factory.publish",

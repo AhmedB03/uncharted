@@ -187,3 +187,13 @@ def test_backslash_paths_are_normalized_but_still_contained(tmp_path):
     with pytest.raises(ValueError):  # normalizing must not open a way out of the project
         build.apply(tmp_path, f"===== FILE: ..{bs}evil.py =====\nx\n===== END =====\n")
     assert not (tmp_path.parent / "evil.py").exists()
+
+
+def test_supported_triplets_prefers_dense_and_skips_alien(tmp_path):
+    import json
+    from uncharted.factory.benchmark import supported_triplets
+    f = tmp_path / "support.json"
+    f.write_text(json.dumps({"triple_support": {"1,2,3": 40, "4,5,6": 30, "7,8,9": 2, "1,2,9": 1}}))
+    got = supported_triplets(f, n=1, exclude=[[3, 2, 1]])
+    assert sorted(t for t, _ in got) == [[1, 2, 9], [4, 5, 6], [7, 8, 9]]
+    assert dict((tuple(t), v) for t, v in got)[(4, 5, 6)] == 30

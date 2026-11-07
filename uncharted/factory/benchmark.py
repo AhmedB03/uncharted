@@ -56,6 +56,17 @@ def common_triplets(clusters_path, n, seed=0, exclude=()):
     return [(list(t), support[t]) for t in head[:n]]
 
 
+def supported_triplets(support_path, n, seed=0, exclude=()):
+    """The n*3 triples the most repos of a bigger corpus share (see `uncharted.py support`)."""
+    support = json.loads(Path(support_path).read_text())["triple_support"]
+    skip = {tuple(sorted(e)) for e in exclude}
+    ranked = [(list(map(int, k.split(","))), v) for k, v in support.items()]
+    ranked = [(t, v) for t, v in sorted(ranked, key=lambda x: (-x[1], x[0])) if tuple(t) not in skip]
+    head = ranked[: n * 3]
+    random.Random(seed).shuffle(head)
+    return head
+
+
 def alien_triplets(results_path, n):
     seqs = json.loads(Path(results_path).read_text())["top_k_sequences"]
     return [s for s in seqs if len(s["cluster_ids"]) == 3][:n]
@@ -147,6 +158,8 @@ def main(argv=None):
     p.add_argument("--model", default=llm.DEFAULT_MODEL)
     p.add_argument("--spec-model", default=None,
                    help="Model that writes specs (default: --model). Keep it fixed when extending a run.")
+    p.add_argument("--support", default=None,
+                   help="Pick common triples by repo support in a bigger corpus (output of `uncharted.py support`)")
     p.add_argument("--rpm", type=int, default=8)
     p.add_argument("--max-iters", type=int, default=6)
     p.add_argument("--workers", type=int, default=1, help="Ideas built at once (paid APIs: 4 is fine)")
@@ -162,7 +175,9 @@ def main(argv=None):
         alien = alien_triplets(args.results, args.n * 3)
         alien_combos = [(s["cluster_ids"], {"rank": s["rank_fused"], "coherence_z": round(s["z_coherence"], 3),
                                             "unavailability_z": round(s["z_availability"], 3)}) for s in alien]
-        common = common_triplets(args.clusters, args.n * 3, args.seed, exclude=[s["cluster_ids"] for s in alien])
+        taken = [s["cluster_ids"] for s in alien]
+        common = (supported_triplets(args.support, args.n, args.seed, exclude=taken) if args.support
+                  else common_triplets(args.clusters, args.n * 3, args.seed, exclude=taken))
         common_combos = [(ids, {"repo_support": sup}) for ids, sup in common]
         # Interleave arms so a quota cut-off leaves them balanced.
         for k in range(1, args.n + 1):
