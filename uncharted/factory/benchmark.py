@@ -69,7 +69,7 @@ def fill_arm(reg, arm, combos, n, names, repos, args):
             break
         if tuple(sorted(cluster_ids)) in seen:
             continue
-        slug, status = spec.write_spec(reg, cluster_ids, names, repos, args.model, args.rpm, arm=arm, **extra)
+        slug, status = spec.write_spec(reg, cluster_ids, names, repos, args.spec_model or args.model, args.rpm, arm=arm, **extra)
         if slug is None:
             print(f"  [{arm}] spec failed for {cluster_ids}: {status[:120]}")
             continue
@@ -145,6 +145,8 @@ def main(argv=None):
     p.add_argument("--out", default="factory_out/benchmark")
     p.add_argument("--n", type=int, default=8, help="Ideas per arm")
     p.add_argument("--model", default=llm.DEFAULT_MODEL)
+    p.add_argument("--spec-model", default=None,
+                   help="Model that writes specs (default: --model). Keep it fixed when extending a run.")
     p.add_argument("--rpm", type=int, default=8)
     p.add_argument("--max-iters", type=int, default=6)
     p.add_argument("--workers", type=int, default=1, help="Ideas built at once (paid APIs: 4 is fine)")

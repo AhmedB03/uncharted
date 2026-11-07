@@ -15,6 +15,7 @@ The alien factory:
     publish     Ship passing projects to GitHub, labeled as AI made (dry run by default)
     gallery     Static page of everything made, ranked by stars
     benchmark   Common vs alien: same model, same loop, compare build success
+    judge       Blind quality scores for benchmark builds (novelty, substance, ...)
 
 Steps 2 and 3 reuse the original Alien training and sampling code unchanged;
 see scripts/train_and_sample.sh.
@@ -47,6 +48,7 @@ COMMANDS = {
     "publish": "uncharted.factory.publish",
     "gallery": "uncharted.factory.gallery",
     "benchmark": "uncharted.factory.benchmark",
+    "judge": "uncharted.factory.judge",
 }
 
 
