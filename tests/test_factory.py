@@ -176,3 +176,14 @@ def test_registry_parallel_processes_keep_each_others_updates(tmp_path):
     ideas = registry.Registry(tmp_path).ideas
     assert len(ideas) == 60
     assert not list(tmp_path.glob("*.lock")) and not list(tmp_path.glob("*.tmp"))
+
+
+def test_backslash_paths_are_normalized_but_still_contained(tmp_path):
+    bs = "\\"
+    reply = (f"===== FILE: pkg{bs}__init__.py =====\nX = 1\n"
+             f"===== FILE: tests{bs}test_pkg.py =====\nfrom pkg import X\n===== END =====\n")
+    assert sorted(build.apply(tmp_path, reply)) == ["pkg/__init__.py", "tests/test_pkg.py"]
+    assert (tmp_path / "tests" / "test_pkg.py").read_text().startswith("from pkg import X")
+    with pytest.raises(ValueError):  # normalizing must not open a way out of the project
+        build.apply(tmp_path, f"===== FILE: ..{bs}evil.py =====\nx\n===== END =====\n")
+    assert not (tmp_path.parent / "evil.py").exists()

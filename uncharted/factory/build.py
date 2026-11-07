@@ -83,15 +83,23 @@ def parse_files(reply):
         files, deletes = {}, []
         for i, m in enumerate(marks):
             if m.group(1) == "DELETE":
-                deletes.append(m.group(2))
+                deletes.append(norm_path(m.group(2)))
                 continue
             stop = marks[i + 1].start() if i + 1 < len(marks) else (end.start() if end else len(reply))
             body = reply[m.end():stop].strip("\n")
             fence = re.fullmatch(r"```[\w+-]*\n(.*?)\n?```\s*", body, re.S)
-            files[m.group(2)] = fence.group(1) if fence else body
+            files[norm_path(m.group(2))] = fence.group(1) if fence else body
         return files, deletes
     data = llm.parse_json(reply)
-    return data.get("files") or {}, data.get("delete") or []
+    files, deletes = data.get("files") or {}, data.get("delete") or []
+    if isinstance(files, dict):
+        files = {norm_path(k): v for k, v in files.items()}
+    return files, [norm_path(d) for d in deletes if isinstance(d, str)]
+
+
+def norm_path(rel):
+    """Models sometimes write Windows-style backslash paths; treat them as forward slashes."""
+    return rel.strip().replace("\\", "/")
 
 
 def stdlib_hints(out, pkg):
