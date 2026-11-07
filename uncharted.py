@@ -16,6 +16,7 @@ The alien factory:
     gallery     Static page of everything made, ranked by stars
     benchmark   Common vs alien: same model, same loop, compare build success
     support     Count how many repos of a bigger corpus share each technique triple
+    spec-experiment  Re-spec top verified-alien ideas with a stricter prompt and compare
     judge       Blind quality scores for benchmark builds (novelty, substance, ...)
 
 Steps 2 and 3 reuse the original Alien training and sampling code unchanged;
@@ -51,6 +52,7 @@ COMMANDS = {
     "gallery": "uncharted.factory.gallery",
     "benchmark": "uncharted.factory.benchmark",
     "judge": "uncharted.factory.judge",
+    "spec-experiment": "uncharted.factory.spec_experiment",
 }
 
 

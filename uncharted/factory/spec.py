@@ -50,24 +50,74 @@ inputs", real-time updates, logging, "no network access", or "uses only the stan
 those cannot be asserted."""
 
 
+PROMPT_V2 = """You design software projects from combinations of techniques that no existing project combines.
+
+These three techniques were checked against ~3,000 popular GitHub repos: none of them uses all three.
+Design ONE project where the three genuinely depend on each other, so the result can do something
+no existing tool does.
+
+TECHNIQUES (with repos where each normally shows up):
+{atoms}
+
+Work in this order:
+1. Name the closest existing tool or library to what you are about to build.
+2. Decide what your project can do that that tool cannot. That capability is the project's point,
+   and it must come from combining the three techniques, not from any one of them alone.
+3. Design the smallest version that really delivers that capability.
+
+Realness rules (a reviewer will read the code):
+- Every technique must be implemented for real. If the full technique is out of reach in pure
+  Python, pick one real, central piece of it and implement that piece properly (e.g. for QUIC:
+  its packet numbering, ack ranges and loss detection over in-memory datagrams; for TLS: actual
+  authenticated encryption built from hashlib/hmac). Never a renamed dict, counter, sleep or
+  print standing in for the technique. Never call anything "simulated" or "mock".
+- If no honest version fits these limits, set "feasible" to false and explain why.
+
+Hard constraints (the project is built and tested automatically):
+- Python 3.11, standard library ONLY. No pip packages besides pytest for tests.
+- No network access, no GUI, no API keys, deterministic behavior.
+- About 400 to 900 lines of code. A CLI tool or an importable library.
+
+Return only JSON:
+{{
+  "feasible": true,
+  "closest_existing": "the tool from step 1",
+  "slug": "short-kebab-case-name",
+  "title": "Readable Name",
+  "pitch": "one sentence: what it does that nothing else does, and who it is for",
+  "why_unusual": "one sentence: why nobody would normally build this",
+  "kind": "cli",
+  "features": ["3 to 6 concrete features, each naming the real mechanism it uses"],
+  "usage": "example command or code a user would run",
+  "tests": ["6 to 12 specific behaviors the test suite must check"]
+}}
+
+Each entry in "tests" must be a concrete input -> expected output check a unit test can assert
+exactly. At least two tests must exercise the techniques working together. Never list performance,
+"handles large inputs", real-time updates, logging, "no network access", or "uses only the
+standard library": those cannot be asserted."""
+
+PROMPTS = {"v1": PROMPT, "v2": PROMPT_V2}
+
+
 def slugify(s):
     s = re.sub(r"[^a-z0-9]+", "-", s.lower()).strip("-")
     return s[:40].strip("-") or "alien-project"
 
 
-def write_spec(reg, cluster_ids, names, repos, model, rpm, **extra):
+def write_spec(reg, cluster_ids, names, repos, model, rpm, prompt_version="v1", max_tokens=6000, **extra):
     """Spec one combination into the registry. Returns (slug, status) or (None, error message)."""
     atoms = [names.get(c, f"cluster {c}") for c in cluster_ids]
     listing = "\n".join(
         f"- {a}   (e.g. {', '.join(sorted(repos[c])[:3]) or 'n/a'})" for a, c in zip(atoms, cluster_ids))
-    prompt = PROMPT.format(atoms=listing)
+    prompt = PROMPTS[prompt_version].format(atoms=listing)
     try:
-        spec = llm.parse_json(llm.chat(prompt, model, rpm, max_tokens=6000))
+        spec = llm.parse_json(llm.chat(prompt, model, rpm, max_tokens=max_tokens))
     except ValueError as e:  # unparseable reply: ask once more with the error attached
         try:
             spec = llm.parse_json(llm.chat(prompt + f"\n\nYour previous reply was not valid JSON ({e}). Reply "
                                            "with ONLY the JSON object, double-quoted keys, no comments.",
-                                           model, rpm, max_tokens=6000))
+                                           model, rpm, max_tokens=max_tokens))
         except Exception as e2:
             return None, str(e2)
     except Exception as e:
@@ -76,7 +126,7 @@ def write_spec(reg, cluster_ids, names, repos, model, rpm, **extra):
     status = "spec" if spec.get("feasible", True) else "infeasible"
     reg.update(slug, status=status, atoms=atoms, cluster_ids=list(cluster_ids),
                example_repos={a: sorted(repos[c])[:3] for a, c in zip(atoms, cluster_ids)},
-               spec=spec, spec_model=model, **extra)
+               spec=spec, spec_model=model, spec_prompt=prompt_version, **extra)
     return slug, status
 
 
