@@ -1,6 +1,9 @@
 """The factory's ledger: every idea, what happened to it, and where it lives."""
 
 import json
+import os
+import time
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -10,7 +13,15 @@ class Registry:
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
         self.path = self.root / "registry.json"
-        self.data = json.loads(self.path.read_text()) if self.path.exists() else {"ideas": {}}
+        self.data = self._read() if self.path.exists() else {"ideas": {}}
+
+    def _read(self):
+        for attempt in range(50):
+            try:
+                return json.loads(self.path.read_text())
+            except PermissionError:  # Windows: another process is replacing the file right now
+                time.sleep(0.1)
+        return json.loads(self.path.read_text())
 
     @property
     def ideas(self):
@@ -30,13 +41,47 @@ class Registry:
         return slug
 
     def update(self, slug, **fields):
-        self.ideas.setdefault(slug, {"slug": slug, "created": now()}).update(fields, updated=now())
-        self.save()
+        # Parallel builds run in separate processes that share this file, so merge into the
+        # copy on disk under a lock instead of writing back a stale in-memory snapshot.
+        with self._lock():
+            if self.path.exists():
+                self.data = self._read()
+            self.ideas.setdefault(slug, {"slug": slug, "created": now()}).update(fields, updated=now())
+            self._write()
 
     def save(self):
-        tmp = self.path.with_suffix(".tmp")
+        with self._lock():
+            self._write()
+
+    def _write(self):
+        tmp = self.path.with_suffix(f".{os.getpid()}.tmp")
         tmp.write_text(json.dumps(self.data, indent=2))
+        for attempt in range(50):
+            try:
+                tmp.replace(self.path)
+                return
+            except PermissionError:  # Windows: another process is reading the file right now
+                time.sleep(0.1)
         tmp.replace(self.path)
+
+    @contextmanager
+    def _lock(self, stale=30):
+        lock = self.path.with_suffix(".lock")
+        start = time.time()
+        while True:
+            try:
+                fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                break
+            except (FileExistsError, PermissionError):  # Windows: lock file is mid-delete
+                if time.time() - start > stale:  # holder died mid-write; writes take milliseconds
+                    lock.unlink(missing_ok=True)
+                    start = time.time()
+                time.sleep(0.05)
+        try:
+            yield
+        finally:
+            os.close(fd)
+            lock.unlink(missing_ok=True)
 
 
 def now():

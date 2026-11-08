@@ -9,3 +9,4 @@ third_party/
 .env
 factory_out/
 *.log
+repos_big/

@@ -26,7 +26,7 @@ build-db   repos as papers, contributors as authors (original schema)      -> da
 train      original Alien code, unchanged: coherence transformer + contributor dual encoder
 sample     rank triplets by (1 - beta) z(coherence) + beta z(unavailability)
 show       readable combinations with example repos per atom
-benchmark  (planned) spec writing + Claude Code / Copilot agent build trials, common vs alien
+benchmark  common vs alien: same spec prompt, model and build loop on both arms -> results/benchmark.md
 ```
 
 Step 1 writes exactly the file formats the original repo reads, so steps 2 and 3 run on the authors' code with no modifications. That was verified end to end: `make-datasets`, `make-availability`, `train-coherence`, `train-availability` and `sample` all run on Uncharted output.
@@ -68,20 +68,39 @@ No model at all? `atomize --mock` and `cluster --embedder tfidf --namer medoid` 
 Once you have sampled combinations, the factory turns them into real, public software:
 
 ```bash
-export GEMINI_API_KEY=...        # free key from Google AI Studio
+export OPENROUTER_API_KEY=...    # spec writer: Sonnet 5.5, about $0.05 per spec
+python uncharted.py support --repos repos_big           # once: which combinations already exist
 python uncharted.py spec    --results results/alien/k3/beta_0.7/results.json --n 20
-python uncharted.py build   --max 5
+python uncharted.py build   --max 5 --model openrouter/anthropic/claude-haiku-5.5
 python uncharted.py publish --org your-github-org            # dry run first
 python uncharted.py publish --org your-github-org --yes      # ships up to 3 per day
 python uncharted.py gallery --refresh-stars                  # factory_out/gallery/index.html
 ```
 
-* **spec** asks the model to design one small, useful, standard library Python project that uses every technique in the combination, or to say honestly that none fits.
-* **build** has the model write the code and tests, runs pytest, sends failures back, and repeats up to 6 times. Weak tests (no real assertions, `assert True`) are rejected and sent back too.
+* **spec** asks the model to design one standard library Python project that uses every technique in the combination, or to say honestly that none fits. The default (v2) prompt makes it name the closest existing tool and beat it, and forbids "simulated" stand-ins for a technique. Combinations that any repo in the big corpus (`data/support_big.json`, from `support`) already contains are skipped; `--max-support -1` turns that off, `--prompt v1 --model gemini/gemini-3.8-flash` gives the old free-tier setup.
+* **build** has the model write the code and tests, runs pytest, sends failures back, and repeats up to 8 times. Weak tests (no real assertions, `assert True`) are rejected and sent back too.
 * **publish** pushes passing projects to GitHub with a README that says plainly they were invented and built by AI, tagged `ai-generated`. It is capped per day so the org never looks like spam.
 * **gallery** is a static page of everything, failures included, ranked by stars. Host it on GitHub Pages.
 
 Everything lands in `factory_out/registry.json`, which becomes the dataset: which kinds of alien combinations get built, which fail, and which people actually star.
+
+## The benchmark: do models get worse in the alien space?
+
+Results so far (n = 100 per arm, blind judge, spec experiment): [docs/results-2026-11-07.md](docs/results-2026-11-07.md).
+
+```bash
+python uncharted.py benchmark --n 8 --model ollama/qwen2.5:7b   # resumable
+python uncharted.py benchmark --report-only                      # results/benchmark.md
+```
+
+Two arms go through the identical spec prompt, build loop and model:
+
+* **alien**: the sampler's top combinations (coherent, low availability).
+* **common**: three-technique combinations that a real repo in the corpus already contains, preferring triples several repos share. By construction these sit in the dense part of GitHub.
+
+The report compares build rate, repair iterations and test counts per arm, plus a one-sided Fisher exact test. Ideas live in their own registry (`factory_out/benchmark`) so they never mix with publishable output. With a few ideas per arm it is a pilot; the interesting runs use a stronger model and `--n 20` or more.
+
+**Small local models:** builds ask for plain `===== FILE: path =====` blocks rather than code inside JSON, since small models routinely break JSON escaping. Ollama calls get a 16k context window (`UNCHARTED_NUM_CTX`), because Ollama's 4096 default silently truncates fix prompts.
 
 **Safety:** generated code runs inside Docker with no network when Docker is installed (`uncharted-runner` image, built automatically). Without Docker it runs as a plain subprocess after a warning, so install Docker Desktop before running the factory on your main machine.
 

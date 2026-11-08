@@ -36,8 +36,22 @@ Layout rules:
 - Python 3.11 standard library only. No network, no files outside a temp directory.
 - Real, working code. No TODOs, no placeholders, no stubs.
 
-Return only JSON mapping each file path to its full contents:
-{{"files": {{"{pkg}/__init__.py": "...", "tests/test_{pkg}.py": "..."}}}}"""
+""" + "{format}"
+
+FILE_FORMAT = """Return every file as a block in exactly this format, with nothing else around it:
+
+===== FILE: {pkg}/__init__.py =====
+<full contents>
+===== FILE: tests/test_{pkg}.py =====
+<full contents>
+===== END ====="""
+
+FIX_FORMAT = """Return the full new contents of every file you change, in exactly this format:
+
+===== FILE: path/to/file.py =====
+<full contents>
+===== END =====
+To delete a file, add a line `===== DELETE: path =====` before END."""
 
 FIX_PROMPT = """Your project fails its tests. Fix the CODE so the tests pass. Only change a test
 if the test itself is wrong about what the spec asks for; never weaken a test to make it pass.
@@ -48,11 +62,60 @@ SPEC:
 CURRENT FILES:
 {files}
 
-PYTEST OUTPUT (truncated):
+{hints}PYTEST OUTPUT (truncated):
 {output}
 
-Return only JSON with the full new contents of every file you change:
-{{"files": {{"path": "full contents"}}, "delete": []}}"""
+""" + "{format}"
+
+FILE_RE = re.compile(r"^=====\s*(FILE|DELETE):\s*(\S+?)\s*=====\s*$", re.M)
+END_RE = re.compile(r"^=====\s*END\s*=====\s*$", re.M)
+
+
+def parse_files(reply):
+    """Return (files, deletes) from a reply in file-block format, falling back to JSON.
+
+    Small local models routinely break JSON when code contains quotes or backslashes,
+    so the prompts ask for plain delimited blocks; JSON is still accepted.
+    """
+    marks = list(FILE_RE.finditer(reply))
+    if marks:
+        end = END_RE.search(reply, marks[-1].end())
+        files, deletes = {}, []
+        for i, m in enumerate(marks):
+            if m.group(1) == "DELETE":
+                deletes.append(norm_path(m.group(2)))
+                continue
+            stop = marks[i + 1].start() if i + 1 < len(marks) else (end.start() if end else len(reply))
+            body = reply[m.end():stop].strip("\n")
+            fence = re.fullmatch(r"```[\w+-]*\n(.*?)\n?```\s*", body, re.S)
+            files[norm_path(m.group(2))] = fence.group(1) if fence else body
+        return files, deletes
+    data = llm.parse_json(reply)
+    files, deletes = data.get("files") or {}, data.get("delete") or []
+    if isinstance(files, dict):
+        files = {norm_path(k): v for k, v in files.items()}
+    return files, [norm_path(d) for d in deletes if isinstance(d, str)]
+
+
+def norm_path(rel):
+    """Models sometimes write Windows-style backslash paths; treat them as forward slashes."""
+    return rel.strip().replace("\\", "/")
+
+
+def stdlib_hints(out, pkg):
+    """Plain-language hints for the failures small models keep missing in raw pytest output."""
+    hints = []
+    for mod in sorted(set(re.findall(r"No module named '([\w.]+)'", out))):
+        top = mod.split(".")[0]
+        if top == pkg:
+            hints.append(f"- `{mod}` does not exist: create that module or fix the import.")
+        elif top not in sys.stdlib_module_names and top != "pytest":
+            hints.append(f"- `{top}` is NOT in the Python standard library and is not installed. Remove every "
+                         f"use of it and rewrite that code with the standard library only.")
+    if "error collecting" in out.lower() or "errors during collection" in out.lower():
+        hints.append("- The test file could not even be imported, so ZERO tests ran. Fix the import/syntax "
+                     "error first.")
+    return ("HINTS:\n" + "\n".join(hints) + "\n\n") if hints else ""
 
 
 def pkg_name(slug):
@@ -69,15 +132,16 @@ def safe_path(root, rel):
 
 
 def apply(root, reply):
-    data = llm.parse_json(reply)
-    files = data.get("files") or {}
+    files, deletes = parse_files(reply)
     if not isinstance(files, dict) or not files:
         raise ValueError("reply had no files")
+    for rel in files:
+        safe_path(root, rel)  # validate every path before writing any
     for rel, content in files.items():
         p = safe_path(root, rel)
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(content if content.endswith("\n") else content + "\n", encoding="utf-8")
-    for rel in data.get("delete") or []:
+    for rel in deletes:
         p = safe_path(root, rel)
         if p.is_file():
             p.unlink()
@@ -113,10 +177,15 @@ def run_tests(root, sandbox, timeout=180):
     else:
         cmd = [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "tests"]
         env = {"PATH": os.environ.get("PATH", ""), "PYTHONDONTWRITEBYTECODE": "1",
-               "HOME": str(root.resolve())}
+               "HOME": str(root.resolve()), "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1"}
+        # Windows cannot start sockets/asyncio without these; a bare env makes every run "fail".
+        for k in ("SYSTEMROOT", "WINDIR", "TEMP", "TMP"):
+            if k in os.environ:
+                env[k] = os.environ[k]
         cwd = root
     try:
-        r = subprocess.run(cmd, cwd=cwd, env=env, capture_output=True, text=True, timeout=timeout)
+        r = subprocess.run(cmd, cwd=cwd, env=env, capture_output=True, text=True, timeout=timeout,
+                           encoding="utf-8", errors="replace")
         out = r.stdout + r.stderr
     except subprocess.TimeoutExpired:
         return 0, 1, f"Tests timed out after {timeout}s (infinite loop or blocking input?)"
@@ -140,6 +209,76 @@ def loc(root):
                for p in root.rglob("*.py") if "__pycache__" not in p.parts and "tests" not in p.parts)
 
 
+STDLIB_PROMPT = """This Python file imports {mods}, which are NOT in the Python 3.11 standard library and
+are not installed. Rewrite the file so it does the same job using ONLY the standard library
+(plus pytest in test files). Keep every function, class and name it exposes.
+
+===== FILE: {rel} =====
+{code}
+===== END =====
+
+""" + FIX_FORMAT
+
+
+def foreign_imports(root, pkg):
+    """{relative path: sorted third-party top-level modules} for every .py file in the project."""
+    import ast
+    local = {pkg, "pytest", "tests", "conftest", "_pytest"}
+    local |= {p.stem for p in root.rglob("*.py")} | {p.name for p in root.iterdir() if p.is_dir()}
+    found = {}
+    for p in sorted(root.rglob("*.py")):
+        if "__pycache__" in p.parts:
+            continue
+        try:
+            tree = ast.parse(p.read_text(encoding="utf-8"))
+        except SyntaxError:
+            continue  # pytest will report it
+        mods = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                mods |= {a.name.split(".")[0] for a in node.names}
+            elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+                mods.add(node.module.split(".")[0])
+        bad = sorted(m for m in mods if m not in sys.stdlib_module_names and m not in local)
+        if bad:
+            found[p.relative_to(root).as_posix()] = bad
+    return found
+
+
+def purge_foreign_imports(root, pkg, args, tries=2):
+    """Ask for a targeted, one-file rewrite of anything importing third-party packages."""
+    for _ in range(tries):
+        bad = foreign_imports(root, pkg)
+        if not bad:
+            return {}
+        for rel, mods in bad.items():
+            code = (root / rel).read_text(encoding="utf-8")
+            try:
+                ask_and_apply(root, STDLIB_PROMPT.format(mods=", ".join(mods), rel=rel, code=code), args, 0.2)
+            except Exception:
+                pass
+    return foreign_imports(root, pkg)
+
+
+# 8000 cut 800+ line projects off before their tests were written (every build then "failed"
+# with no test file). The cap only costs anything when the model actually needs the room.
+BUILD_MAX_TOKENS = int(os.environ.get("UNCHARTED_BUILD_MAX_TOKENS", "32000"))
+
+
+def ask_and_apply(root, prompt, args, temperature):
+    """One model call; if the reply cannot be parsed, ask once more with the error attached."""
+    reply = llm.chat(prompt, args.model, args.rpm, temperature=temperature, max_tokens=BUILD_MAX_TOKENS)
+    try:
+        return apply(root, reply)
+    except ValueError as e:
+        if "outside the project" in str(e) or "odd file name" in str(e):
+            raise
+        retry = (prompt + f"\n\nYour previous reply could not be parsed ({e}). Reply again using EXACTLY "
+                 "the file block format above, with no other text.")
+        return apply(root, llm.chat(retry, args.model, args.rpm, temperature=temperature,
+                                    max_tokens=BUILD_MAX_TOKENS))
+
+
 def build_one(reg, slug, args, sandbox):
     idea = reg.ideas[slug]
     spec = json.dumps(idea["spec"], indent=2)
@@ -149,14 +288,19 @@ def build_one(reg, slug, args, sandbox):
         shutil.rmtree(root)
     root.mkdir(parents=True)
     history = []
+    prompt = WRITE_PROMPT.format(spec=spec, pkg=pkg, format=FILE_FORMAT.format(pkg=pkg))
     try:
-        apply(root, llm.chat(WRITE_PROMPT.format(spec=spec, pkg=pkg), args.model, args.rpm, temperature=0.3))
+        ask_and_apply(root, prompt, args, temperature=0.3)
     except Exception as e:
-        reg.update(slug, status="failed", fail_reason=f"first draft: {e}"[:300], iterations=0)
+        reg.update(slug, status="failed", fail_reason=f"first draft: {e}"[:300], iterations=0,
+                   build_model=args.model)
         return "failed"
 
     for it in range(1, args.max_iters + 1):
+        leftover = purge_foreign_imports(root, pkg, args)
         passed, failed, out = run_tests(root, sandbox)
+        if leftover:
+            history.append({"iter": it, "foreign_imports": leftover})
         history.append({"iter": it, "passed": passed, "failed": failed})
         print(f"    iter {it}: {passed} passed, {failed} failed")
         if failed == 0 and passed >= args.min_tests:
@@ -172,8 +316,9 @@ def build_one(reg, slug, args, sandbox):
         if it == args.max_iters:
             break
         try:
-            apply(root, llm.chat(FIX_PROMPT.format(spec=spec, files=snapshot(root), output=out[-6000:]),
-                                 args.model, args.rpm, temperature=0.2))
+            ask_and_apply(root, FIX_PROMPT.format(spec=spec, files=snapshot(root), output=out[-6000:],
+                                                  hints=stdlib_hints(out, pkg), format=FIX_FORMAT),
+                          args, temperature=0.2)
         except Exception as e:
             history.append({"iter": it, "error": str(e)[:200]})
     reg.update(slug, status="failed", iterations=len(history), history=history, package=pkg,
@@ -186,7 +331,8 @@ def main(argv=None):
     p.add_argument("--out", default="factory_out")
     p.add_argument("--slug", default=None, help="Build just this idea")
     p.add_argument("--max", type=int, default=5, help="How many ideas to build this run")
-    p.add_argument("--max-iters", type=int, default=6)
+    p.add_argument("--max-iters", type=int, default=8,
+                   help="Fix rounds; v2 specs are ~650 lines and built 14/19 at 8 rounds vs 9/18 at 4")
     p.add_argument("--min-tests", type=int, default=5)
     p.add_argument("--retry-failed", action="store_true")
     p.add_argument("--sandbox", choices=["auto", "docker", "local"], default="auto")
