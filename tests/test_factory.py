@@ -1,6 +1,7 @@
 """Factory test with a fake model: spec -> buggy draft -> test failure -> fix -> built -> gallery."""
 
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -39,7 +40,7 @@ FIXED = ("def merge(x, y):\n    out = dict(x)\n    for k, v in y.items():\n"
 
 
 def fake_chat(prompt, model=None, rpm=8, **kw):
-    if "invent small software projects" in prompt:
+    if "invent small software projects" in prompt or "Design ONE project" in prompt:
         return "```json\n" + json.dumps(SPEC) + "\n```"
     if "Implement this project" in prompt:
         return json.dumps({"files": {"tally_merge/__init__.py": "from .core import merge\n",
@@ -66,11 +67,12 @@ def world(tmp_path, monkeypatch):
 def test_factory_end_to_end(world):
     tmp, clusters, results = world
     out = tmp / "factory_out"
-    spec.main(["--results", str(results), "--clusters", str(clusters), "--out", str(out), "--rpm", "999"])
+    spec.main(["--results", str(results), "--clusters", str(clusters), "--out", str(out), "--rpm", "999",
+               "--max-support", "-1"])
     reg = registry.Registry(out)
     assert list(reg.ideas) == ["tally-merge"] and reg.ideas["tally-merge"]["status"] == "spec"
 
-    spec.main(["--results", str(results), "--clusters", str(clusters), "--out", str(out)])
+    spec.main(["--results", str(results), "--clusters", str(clusters), "--out", str(out), "--max-support", "-1"])
     assert len(registry.Registry(out).ideas) == 1  # same atoms are never specced twice
 
     build.main(["--out", str(out), "--sandbox", "local", "--rpm", "999"])
@@ -197,3 +199,26 @@ def test_supported_triplets_prefers_dense_and_skips_alien(tmp_path):
     got = supported_triplets(f, n=1, exclude=[[3, 2, 1]])
     assert sorted(t for t, _ in got) == [[1, 2, 9], [4, 5, 6], [7, 8, 9]]
     assert dict((tuple(t), v) for t, v in got)[(4, 5, 6)] == 30
+
+
+def test_spec_skips_combinations_the_corpus_already_has(tmp_path, monkeypatch):
+    from uncharted.factory import spec
+    results = tmp_path / "results.json"
+    results.write_text(json.dumps({"top_k_sequences": [
+        {"cluster_ids": [3, 1, 2], "rank_fused": 1, "z_coherence": 1.0, "z_availability": 1.0},  # in 2 repos
+        {"cluster_ids": [4, 5, 6], "rank_fused": 2, "z_coherence": 1.0, "z_availability": 1.0},  # in none
+    ]}))
+    support = tmp_path / "support.json"
+    support.write_text(json.dumps({"triple_support": {"1,2,3": 2}}))
+    monkeypatch.setattr(spec, "load_names", lambda _: ({i: f"atom {i}" for i in range(10)},
+                                                       {i: set() for i in range(10)}))
+    calls = []
+
+    def fake_write(reg, ids, names, repos, model, rpm, prompt_version, max_tokens, **extra):
+        calls.append((list(ids), model, prompt_version, max_tokens, extra.get("repo_support")))
+        return None, "stub"
+    monkeypatch.setattr(spec, "write_spec", fake_write)
+    monkeypatch.delenv("UNCHARTED_REASONING", raising=False)
+    spec.main(["--results", str(results), "--out", str(tmp_path / "out"), "--support", str(support), "--n", "5"])
+    assert calls == [([4, 5, 6], spec.DEFAULT_SPEC_MODEL, "v2", 16000, 0)]
+    assert os.environ["UNCHARTED_REASONING"] == "on"

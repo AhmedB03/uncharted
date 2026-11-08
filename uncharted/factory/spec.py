@@ -1,10 +1,14 @@
 """Turn sampled alien combinations into small, buildable project specs.
 
     python uncharted.py spec --results results/alien/k3/beta_0.7/results.json --n 20
+
+Defaults to Sonnet 5.5 with the v2 prompt, and only specs combinations that no repo in the big
+corpus (data/support_big.json) already contains.
 """
 
 import argparse
 import json
+import os
 import re
 from pathlib import Path
 
@@ -99,6 +103,26 @@ standard library": those cannot be asserted."""
 
 PROMPTS = {"v1": PROMPT, "v2": PROMPT_V2}
 
+# The spec experiment (results/spec_experiment.md) found the spec model is the lever: Sonnet 5.5 with
+# the v2 prompt kept alien novelty into the code (+1.07 code novelty, paired), DeepSeek with v2 did not.
+DEFAULT_SPEC_MODEL = os.environ.get("UNCHARTED_SPEC_MODEL", "openrouter/anthropic/claude-sonnet-5.5")
+DEFAULT_SUPPORT = "data/support_big.json"
+
+
+def support_key(cluster_ids):
+    return ",".join(map(str, sorted(cluster_ids)))
+
+
+def load_support(path, explicit):
+    """triple -> repo count from `uncharted.py support`, or None (with a warning) if the default is missing."""
+    if not Path(path).exists():
+        if explicit:
+            raise SystemExit(f"--support file not found: {path}")
+        print(f"  note: {path} not found, so combinations are not checked against a big corpus. Many sampler "
+              "picks already exist in real repos; run `uncharted.py support` to build it.")
+        return None
+    return json.loads(Path(path).read_text())["triple_support"]
+
 
 def slugify(s):
     s = re.sub(r"[^a-z0-9]+", "-", s.lower()).strip("-")
@@ -136,24 +160,50 @@ def main(argv=None):
     p.add_argument("--clusters", default="data/clusters_80.json")
     p.add_argument("--n", type=int, default=20, help="How many new specs to write")
     p.add_argument("--out", default="factory_out")
-    p.add_argument("--model", default=llm.DEFAULT_MODEL)
+    p.add_argument("--model", default=DEFAULT_SPEC_MODEL,
+                   help="Spec writer (default Sonnet 5.5 on OpenRouter, about $0.05 per spec; "
+                        "set UNCHARTED_SPEC_MODEL or pass e.g. gemini/gemini-3.8-flash for a free tier)")
+    p.add_argument("--prompt", choices=sorted(PROMPTS), default="v2")
+    p.add_argument("--max-tokens", type=int, default=None, help="Default 16000 for v2, 6000 for v1")
+    p.add_argument("--reasoning", choices=["auto", "on", "off"], default="auto",
+                   help="auto: on for Claude Sonnet/Opus (OpenRouter refuses them without it), off otherwise")
+    p.add_argument("--support", default=None,
+                   help=f"Repo support per triple from `uncharted.py support` (default {DEFAULT_SUPPORT} if present)")
+    p.add_argument("--max-support", type=int, default=0,
+                   help="Skip combinations that more than this many corpus repos already contain (default 0: "
+                        "only verified-unbuilt). Use -1 to turn the check off")
     p.add_argument("--rpm", type=int, default=8)
     args = p.parse_args(argv)
+
+    reasoning = args.reasoning
+    if reasoning == "auto":
+        reasoning = "on" if re.search(r"claude-(sonnet|opus)", args.model) else "off"
+    os.environ["UNCHARTED_REASONING"] = reasoning
+    max_tokens = args.max_tokens or (16000 if args.prompt == "v2" else 6000)
+    support = None if args.max_support < 0 else load_support(args.support or DEFAULT_SUPPORT, bool(args.support))
 
     reg = Registry(args.out)
     names, repos = load_names(args.clusters)
     seqs = json.loads(Path(args.results).read_text())["top_k_sequences"]
 
-    made = skipped = 0
+    made = skipped = known = 0
     for s in seqs:
         if made >= args.n:
             break
         atoms = [names.get(c, f"cluster {c}") for c in s["cluster_ids"]]
         if reg.has_atoms(atoms):
             continue
+        extra = {}
+        if support is not None:
+            n_repos = support.get(support_key(s["cluster_ids"]), 0)
+            if n_repos > args.max_support:
+                known += 1
+                continue
+            extra["repo_support"] = n_repos
         slug, status = write_spec(reg, s["cluster_ids"], names, repos, args.model, args.rpm,
+                                  prompt_version=args.prompt, max_tokens=max_tokens,
                                   rank=s["rank_fused"], coherence_z=round(s["z_coherence"], 3),
-                                  unavailability_z=round(s["z_availability"], 3))
+                                  unavailability_z=round(s["z_availability"], 3), **extra)
         if slug is None:
             print(f"  spec failed for {atoms}: {status}")
         elif status == "infeasible":
@@ -163,7 +213,10 @@ def main(argv=None):
         else:
             made += 1
             print(f"  [{made}/{args.n}] {slug}: {reg.ideas[slug]['spec'].get('pitch', '')}")
-    print(f"Done: {made} specs, {skipped} infeasible. Registry: {reg.path}")
+    gate = f", {known} skipped as already built in the corpus" if support is not None else ""
+    print(f"Done: {made} specs, {skipped} infeasible{gate}. Registry: {reg.path}")
+    if made < args.n and support is not None:
+        print("  ran out of unbuilt combinations: re-run the sampler with a larger --top-k")
 
 
 if __name__ == "__main__":

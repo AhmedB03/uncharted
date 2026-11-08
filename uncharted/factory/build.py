@@ -331,7 +331,8 @@ def main(argv=None):
     p.add_argument("--out", default="factory_out")
     p.add_argument("--slug", default=None, help="Build just this idea")
     p.add_argument("--max", type=int, default=5, help="How many ideas to build this run")
-    p.add_argument("--max-iters", type=int, default=6)
+    p.add_argument("--max-iters", type=int, default=8,
+                   help="Fix rounds; v2 specs are ~650 lines and built 14/19 at 8 rounds vs 9/18 at 4")
     p.add_argument("--min-tests", type=int, default=5)
     p.add_argument("--retry-failed", action="store_true")
     p.add_argument("--sandbox", choices=["auto", "docker", "local"], default="auto")
