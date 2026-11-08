@@ -18,7 +18,7 @@ SPEC = {"feasible": True, "slug": "Tally Merge!", "title": "Tally Merge", "pitch
 
 TESTS = """from tally_merge import merge
 
-def test_adds():
+def test_spec_01_adds():
     assert merge({"a": 1}, {"a": 2}) == {"a": 3}
 
 def test_keeps_left():
@@ -46,7 +46,7 @@ def fake_chat(prompt, model=None, rpm=8, **kw):
         return json.dumps({"files": {"tally_merge/__init__.py": "from .core import merge\n",
                                      "tally_merge/core.py": BUGGY, "tests/test_tally_merge.py": TESTS}})
     if "fails its tests" in prompt:
-        assert "test_adds" in prompt  # the failure output reached the model
+        assert "test_spec_01_adds" in prompt  # the failure output reached the model
         return json.dumps({"files": {"tally_merge/core.py": FIXED}})
     raise AssertionError("unexpected prompt")
 
@@ -222,3 +222,74 @@ def test_spec_skips_combinations_the_corpus_already_has(tmp_path, monkeypatch):
     spec.main(["--results", str(results), "--out", str(tmp_path / "out"), "--support", str(support), "--n", "5"])
     assert calls == [([4, 5, 6], spec.DEFAULT_SPEC_MODEL, "v2", 16000, 0)]
     assert os.environ["UNCHARTED_REASONING"] == "on"
+
+
+def test_spec_gate_requires_one_passing_test_per_checklist_entry():
+    out = "\n".join(["PASSED tests/test_x.py::test_spec_01_parses",
+                     "PASSED tests/test_x.py::test_spec_03_cycle[a-b]",
+                     "FAILED tests/test_x.py::test_spec_02_votes - assert 1 == 2",
+                     "PASSED tests/test_x.py::test_other"])
+    assert build.spec_tests_missing(out, 4) == [2, 4]
+    assert build.spec_tests_missing(out, 0) == []
+
+
+INIT = "from .core import merge\n"
+
+
+def gate_world(tmp_path, monkeypatch, replies):
+    """A registry with one spec and a fake model that returns `replies` in order."""
+    calls = []
+
+    def chat(prompt, model=None, rpm=8, **kw):
+        calls.append(prompt)
+        return json.dumps({"files": replies[len(calls) - 1]})
+    monkeypatch.setattr(llm, "chat", chat)
+    out = tmp_path / "factory_out"
+    reg = registry.Registry(out)
+    reg.update("tally-merge", status="spec", atoms=[], spec=SPEC)
+    return out, calls
+
+
+def test_build_is_not_done_until_spec_tests_exist(tmp_path, monkeypatch):
+    unnamed = TESTS.replace("test_spec_01_adds", "test_adds")
+    good = {"tally_merge/__init__.py": INIT, "tally_merge/core.py": FIXED}
+    out, calls = gate_world(tmp_path, monkeypatch, [
+        {**good, "tests/test_tally_merge.py": unnamed},  # passes, but checklist entry 1 has no test
+        {"tests/test_tally_merge.py": TESTS},
+    ])
+    build.main(["--out", str(out), "--sandbox", "local", "--rpm", "999"])
+    idea = registry.Registry(out).ideas["tally-merge"]
+    assert idea["status"] == "built" and idea["iterations"] == 2
+    assert "01: merge adds counts" in calls[1]
+    assert idea["history"][0]["spec_missing"] == 1
+
+
+def test_a_fix_that_makes_things_worse_is_undone(tmp_path, monkeypatch):
+    draft = {"tally_merge/__init__.py": INIT, "tally_merge/core.py": BUGGY, "tests/test_tally_merge.py": TESTS}
+    out, calls = gate_world(tmp_path, monkeypatch, [
+        draft,
+        {"tally_merge/core.py": "def merge(x, y) syntax error"},  # breaks collection: 0 pass
+        {"tally_merge/core.py": FIXED},
+    ])
+    build.main(["--out", str(out), "--sandbox", "local", "--rpm", "999"])
+    idea = registry.Registry(out).ideas["tally-merge"]
+    assert idea["status"] == "built"
+    assert "was undone" in calls[2] and "syntax error" not in calls[2].split("PYTEST OUTPUT")[0]
+
+
+def test_an_end_line_after_every_file_is_not_written_into_the_file():
+    reply = "\n".join(["===== FILE: p/a.py =====", "A = 1", "===== END =====", "",
+                       "===== FILE: p/b.py =====", "B = 2", "===== END ====="])
+    files, _ = build.parse_files(reply)
+    assert files == {"p/a.py": "A = 1", "p/b.py": "B = 2"}
+
+
+def test_snapshot_marks_truncation_and_can_put_tests_last(tmp_path):
+    (tmp_path / "zpkg").mkdir()
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "zpkg" / "__init__.py").write_text("x = 1\n" * 50)
+    (tmp_path / "tests" / "test_z.py").write_text("def test_z(): pass\n")
+    full = build.snapshot(tmp_path, tests_last=True)
+    assert full.index("zpkg/__init__.py") < full.index("tests/test_z.py")
+    cut = build.snapshot(tmp_path, limit=100)
+    assert "truncated" in cut and "more characters not shown" in cut

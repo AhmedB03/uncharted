@@ -109,7 +109,9 @@ def main(argv=None):
             if limit[1] == "0":
                 print("  no budget left for code judging", flush=True)
                 continue
-        judge.main(["--out", out, "--workers", "6", "--report", f"results/spec_exp_{v}_code.md"] + limit)
+        # Pinned to the 30k view: the paired baseline scores in judge.json were made from it.
+        judge.main(["--out", out, "--workers", "6", "--source-chars", str(judge.LEGACY_SOURCE_CHARS),
+                    "--report", f"results/spec_exp_{v}_code.md"] + limit)
         os.environ["UNCHARTED_REASONING"] = "off"
 
     report(args, picked)
