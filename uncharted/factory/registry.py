@@ -18,10 +18,10 @@ class Registry:
     def _read(self):
         for attempt in range(50):
             try:
-                return json.loads(self.path.read_text())
+                return json.loads(self.path.read_text(encoding="utf-8"))
             except PermissionError:  # Windows: another process is replacing the file right now
                 time.sleep(0.1)
-        return json.loads(self.path.read_text())
+        return json.loads(self.path.read_text(encoding="utf-8"))
 
     @property
     def ideas(self):
@@ -55,7 +55,7 @@ class Registry:
 
     def _write(self):
         tmp = self.path.with_suffix(f".{os.getpid()}.tmp")
-        tmp.write_text(json.dumps(self.data, indent=2))
+        tmp.write_text(json.dumps(self.data, indent=2), encoding="utf-8")
         for attempt in range(50):
             try:
                 tmp.replace(self.path)
