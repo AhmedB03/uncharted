@@ -20,8 +20,28 @@ from pathlib import Path
 from uncharted import llm
 from uncharted.factory.registry import Registry
 
-IMAGE = "uncharted-runner"
+# Bump the tag whenever runner/Dockerfile changes: docker_ready() only builds a missing image.
+IMAGE = "uncharted-runner:libs1"
 RUNNER_DIR = Path(__file__).parent / "runner"
+
+# Specs written with spec.py's v3lib prompt may use these packages (pip name -> import name).
+# They are installed in the sandbox image; keep this in sync with runner/Dockerfile.
+LIB_IMPORTS = {"numpy": "numpy", "cryptography": "cryptography", "aioquic": "aioquic", "networkx": "networkx",
+               "lark": "lark", "pillow": "PIL", "msgpack": "msgpack", "zstandard": "zstandard",
+               "pyyaml": "yaml", "tomli-w": "tomli_w"}
+LIB_PROMPTS = {"v3lib"}
+
+
+def allowed_imports(idea):
+    return frozenset(LIB_IMPORTS.values()) if idea.get("spec_prompt") in LIB_PROMPTS else frozenset()
+
+
+def deps_rule(allowed):
+    if not allowed:
+        return "- Python 3.11 standard library only."
+    pips = ", ".join(sorted(LIB_IMPORTS))
+    return (f"- Python 3.11 standard library plus ONLY these installed packages: {pips} (import names: "
+            f"{', '.join(sorted(allowed))}). Nothing else is installed.")
 
 WRITE_PROMPT = """Implement this project completely. It will be tested automatically.
 
@@ -42,7 +62,8 @@ Layout rules:
   only counts as built when every one of these passes. Other tests may use any name.
 - Every feature in the spec must be wired into the real code path: a component that is built
   and then never used by the rest of the program does not count.
-- Python 3.11 standard library only. No network, no files outside a temp directory.
+{deps}
+- No network (local sockets on 127.0.0.1 are fine), no files outside a temp directory.
 - Real, working code. No TODOs, no placeholders, no stubs.
 
 """ + "{format}"
@@ -114,14 +135,14 @@ def norm_path(rel):
     return rel.strip().replace("\\", "/")
 
 
-def stdlib_hints(out, pkg):
+def stdlib_hints(out, pkg, allowed=frozenset()):
     """Plain-language hints for the failures small models keep missing in raw pytest output."""
     hints = []
     for mod in sorted(set(re.findall(r"No module named '([\w.]+)'", out))):
         top = mod.split(".")[0]
         if top == pkg:
             hints.append(f"- `{mod}` does not exist: create that module or fix the import.")
-        elif top not in sys.stdlib_module_names and top != "pytest":
+        elif top not in sys.stdlib_module_names and top != "pytest" and top not in allowed:
             hints.append(f"- `{top}` is NOT in the Python standard library and is not installed. Remove every "
                          f"use of it and rewrite that code with the standard library only.")
     if "error collecting" in out.lower() or "errors during collection" in out.lower():
@@ -267,10 +288,10 @@ are not installed. Rewrite the file so it does the same job using ONLY the stand
 """ + FIX_FORMAT
 
 
-def foreign_imports(root, pkg):
+def foreign_imports(root, pkg, allowed=frozenset()):
     """{relative path: sorted third-party top-level modules} for every .py file in the project."""
     import ast
-    local = {pkg, "pytest", "tests", "conftest", "_pytest"}
+    local = {pkg, "pytest", "tests", "conftest", "_pytest"} | set(allowed)
     local |= {p.stem for p in root.rglob("*.py")} | {p.name for p in root.iterdir() if p.is_dir()}
     found = {}
     for p in sorted(root.rglob("*.py")):
@@ -292,10 +313,10 @@ def foreign_imports(root, pkg):
     return found
 
 
-def purge_foreign_imports(root, pkg, args, tries=2):
+def purge_foreign_imports(root, pkg, args, tries=2, allowed=frozenset()):
     """Ask for a targeted, one-file rewrite of anything importing third-party packages."""
     for _ in range(tries):
-        bad = foreign_imports(root, pkg)
+        bad = foreign_imports(root, pkg, allowed)
         if not bad:
             return {}
         for rel, mods in bad.items():
@@ -304,7 +325,7 @@ def purge_foreign_imports(root, pkg, args, tries=2):
                 ask_and_apply(root, STDLIB_PROMPT.format(mods=", ".join(mods), rel=rel, code=code), args, 0.2)
             except Exception:
                 pass
-    return foreign_imports(root, pkg)
+    return foreign_imports(root, pkg, allowed)
 
 
 # 8000 cut 800+ line projects off before their tests were written (every build then "failed"
@@ -335,7 +356,8 @@ def build_one(reg, slug, args, sandbox):
         shutil.rmtree(root)
     root.mkdir(parents=True)
     history = []
-    prompt = WRITE_PROMPT.format(spec=spec, pkg=pkg, format=FILE_FORMAT.format(pkg=pkg))
+    allowed = allowed_imports(idea)
+    prompt = WRITE_PROMPT.format(spec=spec, pkg=pkg, deps=deps_rule(allowed), format=FILE_FORMAT.format(pkg=pkg))
     try:
         ask_and_apply(root, prompt, args, temperature=0.3)
     except Exception as e:
@@ -346,7 +368,7 @@ def build_one(reg, slug, args, sandbox):
     checklist = idea["spec"].get("tests") or []
     best, best_score = None, None
     for it in range(1, args.max_iters + 1):
-        leftover = purge_foreign_imports(root, pkg, args)
+        leftover = purge_foreign_imports(root, pkg, args, allowed=allowed)
         passed, failed, out = run_tests(root, sandbox)
         missing = spec_tests_missing(out, len(checklist)) if args.spec_gate else []
         if leftover:
@@ -388,7 +410,7 @@ def build_one(reg, slug, args, sandbox):
         shown = "\n".join(line for line in out.splitlines() if not line.startswith("PASSED "))
         try:
             ask_and_apply(root, reverted + FIX_PROMPT.format(spec=spec, files=snapshot(root), output=shown[-8000:],
-                                                             hints=stdlib_hints(out, pkg), format=FIX_FORMAT),
+                                                             hints=stdlib_hints(out, pkg, allowed), format=FIX_FORMAT),
                           args, temperature=0.2)
         except Exception as e:
             history.append({"iter": it, "error": str(e)[:200]})

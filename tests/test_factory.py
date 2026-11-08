@@ -284,6 +284,18 @@ def test_an_end_line_after_every_file_is_not_written_into_the_file():
     assert files == {"p/a.py": "A = 1", "p/b.py": "B = 2"}
 
 
+def test_sandbox_library_lists_agree_and_are_only_allowed_for_v3lib(tmp_path):
+    dockerfile = (Path(build.__file__).parent / "runner" / "Dockerfile").read_text()
+    assert sorted(spec.SANDBOX_LIBS) == sorted(build.LIB_IMPORTS)
+    assert all(lib in dockerfile for lib in build.LIB_IMPORTS)
+    (tmp_path / "p").mkdir()
+    (tmp_path / "p" / "a.py").write_text("import numpy\nfrom PIL import Image\nimport requests\n")
+    allowed = build.allowed_imports({"spec_prompt": "v3lib"})
+    assert build.foreign_imports(tmp_path, "p", allowed) == {"p/a.py": ["requests"]}
+    assert build.foreign_imports(tmp_path, "p", build.allowed_imports({"spec_prompt": "v2"})) == {
+        "p/a.py": ["PIL", "numpy", "requests"]}
+
+
 def test_snapshot_marks_truncation_and_can_put_tests_last(tmp_path):
     (tmp_path / "zpkg").mkdir()
     (tmp_path / "tests").mkdir()
