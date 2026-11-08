@@ -1,11 +1,11 @@
-"""Ship built projects to GitHub, clearly labeled as AI invented and AI built.
+"""Ship built projects to GitHub, clearly labeled as AI invented and AI built, credited to you.
 
 Dry run by default: it shows what it would push. Add --yes to really publish.
 Capped per day so the org never looks like spam.
 
-    gh auth login                                   # once
-    python uncharted.py publish --org your-org            # preview
-    python uncharted.py publish --org your-org --yes      # ship up to 3
+    gh auth login                                                    # once
+    python uncharted.py publish --org your-org                       # preview
+    python uncharted.py publish --org your-org --slug gradlens --yes # ship one
 """
 
 import argparse
@@ -17,23 +17,25 @@ from uncharted.factory.registry import Registry, now
 
 README = """# {title}
 
-> **Invented and built by AI.** This project was proposed by [Uncharted]({uncharted_url}), a model
-> trained to find technique combinations that make sense but that no developer community is
-> positioned to build. A language model ({build_model}) then wrote the code and iterated until
-> its own test suite passed. No human wrote or reviewed this code. Treat it as an experiment.
+**Created by {author_md}** with [Uncharted]({uncharted_url}).
+
+> **Invented and built by AI, published by a human.** {author} built and ran Uncharted, a system that
+> finds technique combinations that make sense but that no existing project combines. A language model
+> ({spec_model}) designed this project from one such combination, and another ({build_model}) wrote
+> the code and iterated until its own test suite passed. {author} chose it for publication; no human
+> wrote the code line by line. Treat it as an experiment.
 
 {pitch}
 
 **Why this is unusual:** {why_unusual}
-
-## The alien combination
+{closest}
+## The combination
 
 | Technique | Normally found in |
 | --- | --- |
 {atom_rows}
 
-Coherence z score **{coherence_z:+.2f}** (how well these fit together) and unavailability z score
-**{unavailability_z:+.2f}** (how far they sit from any existing community).
+{evidence}
 
 ## Features
 
@@ -67,24 +69,52 @@ def gh(*args, cwd=None):
     return subprocess.run(["gh", *args], cwd=cwd, capture_output=True, text=True)
 
 
-def write_readme(root, idea, uncharted_url):
+def git_name():
+    r = subprocess.run(["git", "config", "user.name"], capture_output=True, text=True)
+    return r.stdout.strip() or None
+
+
+def pretty_model(m):
+    """openrouter/anthropic/claude-sonnet-5.5 -> Claude Sonnet 5.5"""
+    if not m:
+        return "an LLM"
+    name = m.rsplit("/", 1)[-1]
+    return " ".join(w if w[:1].isdigit() else w.capitalize() for w in name.split("-"))
+
+
+def evidence_text(idea):
+    parts = []
+    if "repo_support" in idea or (idea.get("arm") == "alien" and idea.get("spec_prompt") == "v2"):
+        parts.append("Checked against about 3,000 popular GitHub repos: none of them combines all three.")
+    if "coherence_z" in idea and "unavailability_z" in idea:
+        parts.append(f"Coherence z score **{idea['coherence_z']:+.2f}** (how well these fit together) and "
+                     f"unavailability z score **{idea['unavailability_z']:+.2f}** (how far they sit from any "
+                     "existing community).")
+    return " ".join(parts)
+
+
+def write_readme(root, idea, uncharted_url, author, author_url=None):
     spec = idea["spec"]
     examples = idea.get("example_repos", {})
     rows = "\n".join(
         f"| {a} | {', '.join(f'[{r}](https://github.com/{r})' for r in examples.get(a, [])) or 'n/a'} |"
         for a in idea["atoms"])
+    closest = spec.get("closest_existing")
+    handle = author_url.rstrip("/").rsplit("/", 1)[-1] if author_url else None
     (root / "README.md").write_text(README.format(
-        title=spec.get("title", idea["slug"]), uncharted_url=uncharted_url,
-        build_model=idea.get("build_model", "an LLM"), pitch=spec.get("pitch", ""),
-        why_unusual=spec.get("why_unusual", ""), atom_rows=rows,
-        coherence_z=idea["coherence_z"], unavailability_z=idea["unavailability_z"],
+        title=spec.get("title", idea["slug"]), uncharted_url=uncharted_url, author=author,
+        author_md=f"{author} ([{handle}]({author_url}))" if author_url else author,
+        spec_model=pretty_model(idea.get("spec_model")), build_model=pretty_model(idea.get("build_model")),
+        pitch=spec.get("pitch", ""), why_unusual=spec.get("why_unusual", ""),
+        closest=f"\n**Closest existing tool:** {closest}\n" if closest else "",
+        atom_rows=rows, evidence=evidence_text(idea),
         features="\n".join(f"* {f}" for f in spec.get("features", [])),
         usage=spec.get("usage", f"python -m {idea.get('package', '')}"),
         tests_passed=idea.get("tests_passed", 0), loc=idea.get("loc", 0),
         iterations=idea.get("iterations", 1), date=datetime.now(timezone.utc).date().isoformat(),
     ), encoding="utf-8")
     (root / ".gitignore").write_text("__pycache__/\n.pytest_cache/\n")
-    (root / "LICENSE").write_text(MIT.format(year=datetime.now(timezone.utc).year))
+    (root / "LICENSE").write_text(MIT.format(year=datetime.now(timezone.utc).year, author=author))
 
 
 def published_today(reg):
@@ -96,13 +126,20 @@ def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--org", required=True, help="GitHub user or org to publish under")
     p.add_argument("--out", default="factory_out")
+    p.add_argument("--slug", nargs="+", default=None, help="Publish just these built ideas")
+    p.add_argument("--author", default=None, help="Who gets credit (default: git config user.name)")
+    p.add_argument("--author-url", default=None, help="Default: https://github.com/<org>")
     p.add_argument("--per-day", type=int, default=3)
     p.add_argument("--uncharted-url", default="https://github.com/AhmedB03/uncharted")
     p.add_argument("--yes", action="store_true", help="Actually publish (default is a dry run)")
     args = p.parse_args(argv)
+    author = args.author or git_name() or args.org
+    author_url = args.author_url or f"https://github.com/{args.org}"
 
     reg = Registry(args.out)
-    ready = [s for s, i in reg.ideas.items() if i["status"] == "built"]
+    ready = [s for s, i in reg.ideas.items() if i["status"] == "built" and (not args.slug or s in args.slug)]
+    if args.slug and len(ready) != len(set(args.slug)):
+        raise SystemExit(f"Not built (or not in {args.out}): {', '.join(sorted(set(args.slug) - set(ready)))}")
     room = max(0, args.per_day - published_today(reg))
     if not ready:
         raise SystemExit("Nothing built yet. Run build first.")
@@ -113,13 +150,13 @@ def main(argv=None):
 
     for slug in ready[:room]:
         idea, root = reg.ideas[slug], reg.project_dir(slug)
-        write_readme(root, idea, args.uncharted_url)
+        write_readme(root, idea, args.uncharted_url, author, author_url)
         name = f"{args.org}/{slug}"
         if not args.yes:
-            print(f"  would publish {name}: {idea['spec'].get('pitch', '')}")
+            print(f"  would publish {name} (credited to {author}): {idea['spec'].get('pitch', '')}")
             continue
         for cmd in (["git", "init", "-q", "-b", "main"], ["git", "add", "."],
-                    ["git", "commit", "-q", "-m", "Initial commit: invented and built by Uncharted"]):
+                    ["git", "commit", "-q", "-m", "Initial commit: invented and built with Uncharted"]):
             r = subprocess.run(cmd, cwd=root, capture_output=True, text=True)
             if r.returncode != 0 and "nothing to commit" not in r.stdout:
                 raise SystemExit(f"git failed in {root}: {r.stderr or r.stdout}")
@@ -138,7 +175,7 @@ def main(argv=None):
 
 MIT = """MIT License
 
-Copyright (c) {year} Uncharted Factory contributors
+Copyright (c) {year} {author}
 
 Permission is hereby granted, free of charge, to any person obtaining a copy of this software and
 associated documentation files (the "Software"), to deal in the Software without restriction,
