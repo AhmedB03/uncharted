@@ -16,6 +16,7 @@ The alien factory:
     gallery     Static page of everything made, ranked by stars
     benchmark   Common vs alien: same model, same loop, compare build success
     support     Count how many repos of a bigger corpus share each technique triple
+    rank        Rank every technique triple from those counts (no trained model needed)
     spec-experiment  Re-spec top verified-alien ideas with a stricter prompt and compare
     judge       Blind quality scores for benchmark builds (novelty, substance, ...)
 
@@ -46,6 +47,7 @@ COMMANDS = {
     "build-db": "uncharted.build_db",
     "show": "uncharted.show",
     "support": "uncharted.support",
+    "rank": "uncharted.rank",
     "spec": "uncharted.factory.spec",
     "build": "uncharted.factory.build",
     "publish": "uncharted.factory.publish",

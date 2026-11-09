@@ -70,6 +70,7 @@ Once you have sampled combinations, the factory turns them into real, public sof
 ```bash
 export OPENROUTER_API_KEY=...    # spec writer: Sonnet 5.5, about $0.05 per spec
 python uncharted.py support --repos repos_big           # once: which combinations already exist
+python uncharted.py rank                                # optional: rank every triple from those counts
 python uncharted.py spec    --results results/alien/k3/beta_0.7/results.json --n 20
 python uncharted.py build   --max 5 --model openrouter/anthropic/claude-haiku-5.5
 python uncharted.py publish --org your-github-org            # dry run first
@@ -77,6 +78,7 @@ python uncharted.py publish --org your-github-org --yes      # ships up to 3 per
 python uncharted.py gallery --refresh-stars                  # factory_out/gallery/index.html
 ```
 
+* **rank** is an alternative to the sampler that needs no trained model. It scores all triples by their weakest pair association (smoothed PMI over the `support` corpus), keeps the ones no repo contains, and writes `results/ranked/results.json` in the sampler's format (`spec --results results/ranked/results.json`). An optional `data/clusters_80.names.json` holds hand-reviewed technique names, since the automatic name is one atom and can be much narrower than its cluster, and marks techniques that cannot be done for real in standard library Python so `rank` skips them. Zero support does not prove a combination is unbuilt: with ~3,000 repos, 94% of all triples have none.
 * **spec** asks the model to design one standard library Python project that uses every technique in the combination, or to say honestly that none fits. The default (v2) prompt makes it name the closest existing tool and beat it, and forbids "simulated" stand-ins for a technique. Combinations that any repo in the big corpus (`data/support_big.json`, from `support`) already contains are skipped; `--max-support -1` turns that off, `--prompt v1 --model gemini/gemini-3.8-flash` gives the old free-tier setup.
 * **build** has the model write the code and tests, runs pytest, sends failures back, and repeats up to 8 times. Weak tests (no real assertions, `assert True`) are rejected and sent back too.
 * **publish** pushes passing projects to GitHub with a README that says plainly they were invented and built by AI, tagged `ai-generated`. It is capped per day so the org never looks like spam.

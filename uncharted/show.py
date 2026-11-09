@@ -10,13 +10,30 @@ from collections import defaultdict
 from pathlib import Path
 
 
+def load_overrides(clusters_path):
+    """Hand-reviewed cluster names from the optional `<clusters>.names.json` file next to the clusters.
+
+    The automatic name is the cluster's most central atom, which can be far more specific than the
+    cluster ("pluggable transport protocols including QUIC and KCP" for general multi-protocol
+    networking), and the spec writer takes names literally. Format:
+    {"54": {"name": "...", "stdlib": true}}. "stdlib": false marks a technique that cannot be done
+    for real in standard library Python (a GPU, a GUI, an LLM); `rank` leaves those out.
+    """
+    path = Path(clusters_path).with_suffix(".names.json")
+    if not path.is_file():
+        return {}
+    return {int(k): v for k, v in json.loads(path.read_text(encoding="utf-8")).items()}
+
+
 def load_names(clusters_path):
     data = json.loads(Path(clusters_path).read_text())
     repos = defaultdict(set)
     for a in data["atom_assignments"]:
         if a["cluster"] != -1:
             repos[a["cluster"]].add(a["paper_id"].replace("__", "/"))
-    return {int(k): v["name"] for k, v in data["clusters"].items()}, repos
+    names = {int(k): v["name"] for k, v in data["clusters"].items()}
+    names.update({c: o["name"] for c, o in load_overrides(clusters_path).items() if o.get("name")})
+    return names, repos
 
 
 def main(argv=None):
