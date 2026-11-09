@@ -109,7 +109,28 @@ Reply with only a JSON object:
   "verdict": "<one sentence: the best project this combination could become>"}}"""
 
 
-def prompt_for(idea, root, specs=False, combos=False):
+# Until 2026-11-08 the judge saw only the first 30k characters, with tests sorted in among the
+# package files; 15 of 22 v2-spec builds were longer, so features past the cut read as missing.
+LEGACY_SOURCE_CHARS = 30000
+
+
+def source_for(root, source_chars):
+    if source_chars == LEGACY_SOURCE_CHARS:  # exactly what older cached scores were given
+        return snapshot(root, limit=LEGACY_SOURCE_CHARS)[:LEGACY_SOURCE_CHARS]
+    return snapshot(root, limit=source_chars, tests_last=True)
+
+
+def cache_name(args):
+    if args.combos:
+        return "judge_combos.json"
+    if args.specs:
+        return "judge_specs.json"
+    if args.source_chars == LEGACY_SOURCE_CHARS:
+        return "judge.json"
+    return f"judge_src{args.source_chars // 1000}k.json"  # never mix scores made from different views
+
+
+def prompt_for(idea, root, specs=False, combos=False, source_chars=120000):
     if combos:  # deliberately only the technique names: no spec, no example repos, no arm
         return COMBO_PROMPT.format(atoms="\n".join(f"- {a}" for a in idea["atoms"]))
     s = idea["spec"]
@@ -117,14 +138,14 @@ def prompt_for(idea, root, specs=False, combos=False):
                   features="\n".join(f"- {f}" for f in s.get("features", [])), usage=s.get("usage", ""))
     if specs:
         return SPEC_PROMPT.format(**fields, tests="\n".join(f"- {t}" for t in s.get("tests", [])))
-    return PROMPT.format(**fields, source=snapshot(root, limit=30000))
+    return PROMPT.format(**fields, source=source_for(root, source_chars))
 
 
 def judge_one(idea, root, args):
     dims = dims_for(args)
     last = None
     for _ in range(3):
-        reply = llm.chat(prompt_for(idea, root, args.specs, args.combos), model=args.model, rpm=args.rpm, max_tokens=8000,
+        reply = llm.chat(prompt_for(idea, root, args.specs, args.combos, args.source_chars), model=args.model, rpm=args.rpm, max_tokens=8000,
                          temperature=0.0, system=SYSTEM)
         try:
             out = llm.parse_json(reply)
@@ -216,6 +237,9 @@ def main(argv=None):
                    help="Judge the plan only (no code), for every attempted idea including failed builds")
     p.add_argument("--combos", action="store_true",
                    help="Judge only the three technique names, for every specced idea")
+    p.add_argument("--source-chars", type=int, default=120000,
+                   help=f"How much source the code judge sees (tests last). {LEGACY_SOURCE_CHARS} reproduces the "
+                        "older judge.json scores; any other value gets its own cache file")
     args = p.parse_args(argv)
     dims = dims_for(args)
     what = ("technique combinations (names only; every specced idea)" if args.combos else
@@ -226,11 +250,11 @@ def main(argv=None):
     caches = {}
     for out in args.out:
         reg = Registry(out)
-        cache_path = Path(out) / ("judge_combos.json" if args.combos else "judge_specs.json" if args.specs else "judge.json")
+        cache_path = Path(out) / cache_name(args)
         cache = json.loads(cache_path.read_text(encoding="utf-8")) if cache_path.exists() else {}
         caches[out] = (cache_path, cache)
         for slug, idea in reg.ideas.items():
-            wanted = ("built", "failed", "infeasible", "spec") if args.combos else ("built", "failed") if args.specs else ("built",)
+            wanted = ("built", "failed", "infeasible", "spec") if args.combos else ("built", "failed", "spec") if args.specs else ("built",)
             if idea.get("status") not in wanted or idea.get("arm") not in ("common", "alien"):
                 continue
             key = f"{args.model}::{slug}"

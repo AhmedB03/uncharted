@@ -20,8 +20,28 @@ from pathlib import Path
 from uncharted import llm
 from uncharted.factory.registry import Registry
 
-IMAGE = "uncharted-runner"
+# Bump the tag whenever runner/Dockerfile changes: docker_ready() only builds a missing image.
+IMAGE = "uncharted-runner:libs1"
 RUNNER_DIR = Path(__file__).parent / "runner"
+
+# Specs written with spec.py's v3lib prompt may use these packages (pip name -> import name).
+# They are installed in the sandbox image; keep this in sync with runner/Dockerfile.
+LIB_IMPORTS = {"numpy": "numpy", "cryptography": "cryptography", "aioquic": "aioquic", "networkx": "networkx",
+               "lark": "lark", "pillow": "PIL", "msgpack": "msgpack", "zstandard": "zstandard",
+               "pyyaml": "yaml", "tomli-w": "tomli_w"}
+LIB_PROMPTS = {"v3lib"}
+
+
+def allowed_imports(idea):
+    return frozenset(LIB_IMPORTS.values()) if idea.get("spec_prompt") in LIB_PROMPTS else frozenset()
+
+
+def deps_rule(allowed):
+    if not allowed:
+        return "- Python 3.11 standard library only."
+    pips = ", ".join(sorted(LIB_IMPORTS))
+    return (f"- Python 3.11 standard library plus ONLY these installed packages: {pips} (import names: "
+            f"{', '.join(sorted(allowed))}). Nothing else is installed.")
 
 WRITE_PROMPT = """Implement this project completely. It will be tested automatically.
 
@@ -30,10 +50,20 @@ SPEC:
 
 Layout rules:
 - Package code in `{pkg}/` with `{pkg}/__init__.py`; a CLI also gets `{pkg}/__main__.py`
-  so it runs with `python -m {pkg}`.
-- Tests in `tests/test_{pkg}.py` using pytest. Cover every behavior listed in the spec's
-  "tests". Tests must import `{pkg}` and check real outputs, never `assert True`.
-- Python 3.11 standard library only. No network, no files outside a temp directory.
+  so it runs with `python -m {pkg}`. If the spec's usage names the module differently, use
+  `{pkg}` instead.
+- Split the package into several modules of at most about 300 lines each (for example one per
+  technique plus `cli.py`), so any single file can later be rewritten whole.
+- Tests in `tests/test_{pkg}.py` using pytest. Tests must import `{pkg}` and check real
+  outputs, never `assert True`.
+- The spec's "tests" list is the acceptance checklist. For entry number N (counting from 1),
+  write a test named `test_spec_NN_<short_name>` (two digits, e.g. `test_spec_01_parses_entry`)
+  that checks exactly that behavior with the inputs and expected outputs it gives. The project
+  only counts as built when every one of these passes. Other tests may use any name.
+- Every feature in the spec must be wired into the real code path: a component that is built
+  and then never used by the rest of the program does not count.
+{deps}
+- No network (local sockets on 127.0.0.1 are fine), no files outside a temp directory.
 - Real, working code. No TODOs, no placeholders, no stubs.
 
 """ + "{format}"
@@ -86,7 +116,10 @@ def parse_files(reply):
                 deletes.append(norm_path(m.group(2)))
                 continue
             stop = marks[i + 1].start() if i + 1 < len(marks) else (end.start() if end else len(reply))
-            body = reply[m.end():stop].strip("\n")
+            # Models often close every file with its own END line, not just the last one; left in,
+            # that line is a syntax error (this broke most multi-file fix rounds until 2026-11-08).
+            own_end = END_RE.search(reply, m.end(), stop)
+            body = reply[m.end():own_end.start() if own_end else stop].strip("\n")
             fence = re.fullmatch(r"```[\w+-]*\n(.*?)\n?```\s*", body, re.S)
             files[norm_path(m.group(2))] = fence.group(1) if fence else body
         return files, deletes
@@ -102,14 +135,14 @@ def norm_path(rel):
     return rel.strip().replace("\\", "/")
 
 
-def stdlib_hints(out, pkg):
+def stdlib_hints(out, pkg, allowed=frozenset()):
     """Plain-language hints for the failures small models keep missing in raw pytest output."""
     hints = []
     for mod in sorted(set(re.findall(r"No module named '([\w.]+)'", out))):
         top = mod.split(".")[0]
         if top == pkg:
             hints.append(f"- `{mod}` does not exist: create that module or fix the import.")
-        elif top not in sys.stdlib_module_names and top != "pytest":
+        elif top not in sys.stdlib_module_names and top != "pytest" and top not in allowed:
             hints.append(f"- `{top}` is NOT in the Python standard library and is not installed. Remove every "
                          f"use of it and rewrite that code with the standard library only.")
     if "error collecting" in out.lower() or "errors during collection" in out.lower():
@@ -148,13 +181,47 @@ def apply(root, reply):
     return list(files)
 
 
-def snapshot(root, limit=40000):
-    parts = []
-    for p in sorted(root.rglob("*.py")):
-        if "__pycache__" in p.parts:
-            continue
-        parts.append(f"===== {p.relative_to(root)} =====\n{p.read_text(encoding='utf-8')}")
-    return "\n\n".join(parts)[:limit]
+# The old 40k cap hid the end of the package (and often the whole test file) from the fixer on
+# v2-sized projects: 5 of 8 failed builds were over it, and full-file rewrites of a half-seen
+# module then broke collection. 200k chars is ~50k tokens, well inside the builder's context.
+SNAPSHOT_LIMIT = 200000
+
+
+def snapshot(root, limit=SNAPSHOT_LIMIT, tests_last=False):
+    """All .py files as FILE blocks. tests_last puts package code before tests, so a reader
+    with a smaller limit loses tests rather than the code. Truncation is always marked."""
+    files = [p for p in root.rglob("*.py") if "__pycache__" not in p.parts]
+    key = (lambda p: ("tests" in p.relative_to(root).parts, p.as_posix())) if tests_last else (lambda p: p.as_posix())
+    parts = [f"===== {p.relative_to(root).as_posix()} =====\n{p.read_text(encoding='utf-8')}"
+             for p in sorted(files, key=key)]
+    text = "\n\n".join(parts)
+    if len(text) > limit:
+        text = text[:limit] + f"\n\n[... truncated: {len(text) - limit} more characters not shown]"
+    return text
+
+
+def save_state(root):
+    return {p.relative_to(root).as_posix(): p.read_text(encoding="utf-8")
+            for p in root.rglob("*") if p.is_file() and "__pycache__" not in p.parts}
+
+
+def restore_state(root, state):
+    for p in list(root.rglob("*")):
+        if p.is_file() and "__pycache__" not in p.parts and p.relative_to(root).as_posix() not in state:
+            p.unlink()
+    for rel, text in state.items():
+        p = root / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(text, encoding="utf-8")
+
+
+SPEC_TEST_RE = re.compile(r"^PASSED \S*::test_spec_(\d+)", re.M)
+
+
+def spec_tests_missing(out, n_spec_tests):
+    """Numbers (1-based) of spec checklist entries with no passing test_spec_NN test."""
+    passed = {int(n) for n in SPEC_TEST_RE.findall(out)}
+    return [i for i in range(1, n_spec_tests + 1) if i not in passed]
 
 
 def docker_ready():
@@ -172,10 +239,11 @@ def run_tests(root, sandbox, timeout=180):
     if sandbox == "docker":
         cmd = ["docker", "run", "--rm", "--network", "none", "--memory", "1g", "--cpus", "1",
                "--pids-limit", "256", "-e", "PYTHONDONTWRITEBYTECODE=1", "-v", f"{root.resolve()}:/w", IMAGE,
-               "python", "-m", "pytest", "-q", "-p", "no:cacheprovider", "tests"]
+               "python", "-m", "pytest", "-q", "-rfEp", "-p", "no:cacheprovider", "tests"]
         env, cwd = None, None
     else:
-        cmd = [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "tests"]
+        # -rfEp lists every passed test by name, which spec_tests_missing() needs.
+        cmd = [sys.executable, "-m", "pytest", "-q", "-rfEp", "-p", "no:cacheprovider", "tests"]
         env = {"PATH": os.environ.get("PATH", ""), "PYTHONDONTWRITEBYTECODE": "1",
                "HOME": str(root.resolve()), "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1"}
         # Windows cannot start sockets/asyncio without these; a bare env makes every run "fail".
@@ -220,10 +288,10 @@ are not installed. Rewrite the file so it does the same job using ONLY the stand
 """ + FIX_FORMAT
 
 
-def foreign_imports(root, pkg):
+def foreign_imports(root, pkg, allowed=frozenset()):
     """{relative path: sorted third-party top-level modules} for every .py file in the project."""
     import ast
-    local = {pkg, "pytest", "tests", "conftest", "_pytest"}
+    local = {pkg, "pytest", "tests", "conftest", "_pytest"} | set(allowed)
     local |= {p.stem for p in root.rglob("*.py")} | {p.name for p in root.iterdir() if p.is_dir()}
     found = {}
     for p in sorted(root.rglob("*.py")):
@@ -245,10 +313,10 @@ def foreign_imports(root, pkg):
     return found
 
 
-def purge_foreign_imports(root, pkg, args, tries=2):
+def purge_foreign_imports(root, pkg, args, tries=2, allowed=frozenset()):
     """Ask for a targeted, one-file rewrite of anything importing third-party packages."""
     for _ in range(tries):
-        bad = foreign_imports(root, pkg)
+        bad = foreign_imports(root, pkg, allowed)
         if not bad:
             return {}
         for rel, mods in bad.items():
@@ -257,7 +325,7 @@ def purge_foreign_imports(root, pkg, args, tries=2):
                 ask_and_apply(root, STDLIB_PROMPT.format(mods=", ".join(mods), rel=rel, code=code), args, 0.2)
             except Exception:
                 pass
-    return foreign_imports(root, pkg)
+    return foreign_imports(root, pkg, allowed)
 
 
 # 8000 cut 800+ line projects off before their tests were written (every build then "failed"
@@ -288,7 +356,8 @@ def build_one(reg, slug, args, sandbox):
         shutil.rmtree(root)
     root.mkdir(parents=True)
     history = []
-    prompt = WRITE_PROMPT.format(spec=spec, pkg=pkg, format=FILE_FORMAT.format(pkg=pkg))
+    allowed = allowed_imports(idea)
+    prompt = WRITE_PROMPT.format(spec=spec, pkg=pkg, deps=deps_rule(allowed), format=FILE_FORMAT.format(pkg=pkg))
     try:
         ask_and_apply(root, prompt, args, temperature=0.3)
     except Exception as e:
@@ -296,33 +365,59 @@ def build_one(reg, slug, args, sandbox):
                    build_model=args.model)
         return "failed"
 
+    checklist = idea["spec"].get("tests") or []
+    best, best_score = None, None
     for it in range(1, args.max_iters + 1):
-        leftover = purge_foreign_imports(root, pkg, args)
+        leftover = purge_foreign_imports(root, pkg, args, allowed=allowed)
         passed, failed, out = run_tests(root, sandbox)
+        missing = spec_tests_missing(out, len(checklist)) if args.spec_gate else []
         if leftover:
             history.append({"iter": it, "foreign_imports": leftover})
-        history.append({"iter": it, "passed": passed, "failed": failed})
-        print(f"    iter {it}: {passed} passed, {failed} failed")
-        if failed == 0 and passed >= args.min_tests:
+        history.append({"iter": it, "passed": passed, "failed": failed, "spec_missing": len(missing)})
+        print(f"    iter {it}: {passed} passed, {failed} failed, {len(missing)}/{len(checklist)} spec checks missing")
+
+        # A fix round that rewrites a big module often breaks collection outright (0 passed). Never
+        # build on a worse state: go back to the best one and tell the model its change was undone.
+        score = (len(checklist) - len(missing), passed, -failed)
+        reverted = ""
+        if best_score is not None and score < best_score:
+            restore_state(root, best)
+            reverted = (f"NOTE: your last change made things worse ({best_score[1]} -> {passed} tests passing), "
+                        "so it was undone. The files below are the better earlier version; the pytest output "
+                        "is from your undone change. Make smaller, targeted edits.\n\n")
+            passed, failed, out = best_out
+            missing = spec_tests_missing(out, len(checklist)) if args.spec_gate else []
+        else:
+            best, best_score, best_out = save_state(root), score, (passed, failed, out)
+
+        if failed == 0 and passed >= args.min_tests and not missing:
             if not tests_look_real(root, pkg):
                 out = ("All tests pass but they look trivial: they must import the package and make at "
                        "least 3 real assertions about its outputs. Strengthen the tests, then fix the code.")
             else:
                 reg.update(slug, status="built", iterations=it, tests_passed=passed, loc=loc(root),
-                           history=history, package=pkg, build_model=args.model, sandbox=sandbox)
+                           history=history, package=pkg, build_model=args.model, sandbox=sandbox,
+                           spec_checks=len(checklist) if args.spec_gate else None)
                 return "built"
-        elif failed == 0:
+        elif failed == 0 and passed < args.min_tests:
             out = f"Only {passed} tests ran; write at least {args.min_tests} covering the spec.\n" + out
+        if missing:
+            out = ("These entries of the spec's \"tests\" checklist have no passing `test_spec_NN_*` test. "
+                   "Implement the behavior in the package code (not just the test) and add the test:\n"
+                   + "\n".join(f"- {i:02d}: {checklist[i - 1]}" for i in missing) + "\n\n" + out)
         if it == args.max_iters:
             break
+        shown = "\n".join(line for line in out.splitlines() if not line.startswith("PASSED "))
         try:
-            ask_and_apply(root, FIX_PROMPT.format(spec=spec, files=snapshot(root), output=out[-6000:],
-                                                  hints=stdlib_hints(out, pkg), format=FIX_FORMAT),
+            ask_and_apply(root, reverted + FIX_PROMPT.format(spec=spec, files=snapshot(root), output=shown[-8000:],
+                                                             hints=stdlib_hints(out, pkg, allowed), format=FIX_FORMAT),
                           args, temperature=0.2)
         except Exception as e:
             history.append({"iter": it, "error": str(e)[:200]})
+    if best is not None:
+        restore_state(root, best)  # leave the best attempt on disk, not the last one
     reg.update(slug, status="failed", iterations=len(history), history=history, package=pkg,
-               fail_reason="tests still failing after max iterations", build_model=args.model)
+               fail_reason="tests or spec checks still failing after max iterations", build_model=args.model)
     return "failed"
 
 
@@ -335,6 +430,9 @@ def main(argv=None):
                    help="Fix rounds; v2 specs are ~650 lines and built 14/19 at 8 rounds vs 9/18 at 4")
     p.add_argument("--min-tests", type=int, default=5)
     p.add_argument("--retry-failed", action="store_true")
+    p.add_argument("--no-spec-gate", dest="spec_gate", action="store_false",
+                   help="Count a build as done when its own tests pass, without requiring one passing "
+                        "test_spec_NN test per spec checklist entry (the pre-2026-11-08 behaviour)")
     p.add_argument("--sandbox", choices=["auto", "docker", "local"], default="auto")
     p.add_argument("--model", default=llm.DEFAULT_MODEL)
     p.add_argument("--rpm", type=int, default=8)

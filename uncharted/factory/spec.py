@@ -101,7 +101,75 @@ exactly. At least two tests must exercise the techniques working together. Never
 "handles large inputs", real-time updates, logging, "no network access", or "uses only the
 standard library": those cannot be asserted."""
 
-PROMPTS = {"v1": PROMPT, "v2": PROMPT_V2}
+# v2 specs build and stay novel, but the judges keep calling them "a learning toy" (usefulness ~2/5
+# in 18 of 22 builds). v3 starts from a person and a job they already do, and only then asks how the
+# combination makes that job better. v3lib also allows a fixed set of real libraries, so a project
+# can use real QUIC or real crypto instead of a pure-Python miniature.
+PROMPT_V3 = """You design software projects from combinations of techniques that no existing project combines.
+
+These three techniques were checked against ~3,000 popular GitHub repos: none of them uses all three.
+
+TECHNIQUES (with repos where each normally shows up):
+{atoms}
+
+Work in this order, and be honest at each step:
+1. Pick a real kind of person and a concrete job they already do every week, where these
+   techniques could matter (e.g. "an SRE working out why last night's deploy got slower", "a
+   maintainer triaging which of 40 dependency bumps is safe"). Be specific about the person.
+2. Say what they use for that job today, and exactly where it falls short for them.
+3. Show how the three techniques TOGETHER close that gap, so the combination is the reason the
+   tool works, not decoration. Name the closest existing tool and what yours does that it cannot.
+4. Design the smallest version that person would actually run on day one, on their own real
+   inputs (their files, logs, repos, configs, data exports), producing output they act on.
+If no such person exists for this combination, set "feasible" to false and say why. A smaller
+tool that someone really needs beats a clever demo of the techniques.
+
+Realness rules (a reviewer will read the code):
+- Every technique must be implemented for real. Never a renamed dict, counter, sleep or print
+  standing in for it. Never call anything "simulated", "mock" or "toy".
+{libs}
+Hard constraints (the project is built and tested automatically):
+- No network access during tests (local sockets on 127.0.0.1 are fine), no GUI, no API keys.
+- About 400 to 1200 lines of code. A CLI tool or an importable library.
+- Tests must be deterministic: seed anything random.
+
+Return only JSON:
+{{
+  "feasible": true,
+  "user": "the person from step 1 and the job they do",
+  "today": "what they use today and where it falls short",
+  "closest_existing": "the closest existing tool",
+  "slug": "short-kebab-case-name",
+  "title": "Readable Name",
+  "pitch": "one sentence: who it is for, and what it lets them do that they cannot do today",
+  "why_unusual": "one sentence: why nobody would normally build this",
+  "kind": "cli",
+  "features": ["3 to 6 concrete features, each naming the real mechanism it uses"],
+  "usage": "an example command a user would run on their own inputs",
+  "tests": ["6 to 12 specific behaviors the test suite must check"]
+}}
+
+Each entry in "tests" must be a concrete input -> expected output check a unit test can assert
+exactly. At least two tests must exercise the techniques working together. Never list performance,
+"handles large inputs", real-time updates, logging, "no network access", or "uses only the
+standard library": those cannot be asserted."""
+
+STDLIB_ONLY = """- Python 3.11 standard library ONLY (plus pytest for tests). If a technique is out of reach in
+  pure Python, implement one real, central piece of it properly (e.g. for QUIC: packet numbering,
+  ack ranges and loss detection over in-memory datagrams)."""
+
+# Installed in the build sandbox image (runner/Dockerfile) when a v3lib spec is built.
+SANDBOX_LIBS = ["numpy", "cryptography", "aioquic", "networkx", "lark", "pillow", "msgpack", "zstandard",
+                "pyyaml", "tomli-w"]
+
+WITH_LIBS = ("- Python 3.11, its standard library, and ONLY these installed packages: " + ", ".join(SANDBOX_LIBS)
+             + """.
+  When one of them already implements a technique properly (e.g. aioquic for QUIC, cryptography for
+  TLS-grade crypto), use it rather than re-implementing it, and spend the code on what is new.""")
+
+PROMPTS = {"v1": PROMPT, "v2": PROMPT_V2,
+           "v3": PROMPT_V3.replace("{libs}", STDLIB_ONLY),
+           "v3lib": PROMPT_V3.replace("{libs}", WITH_LIBS)}
 
 # The spec experiment (results/spec_experiment.md) found the spec model is the lever: Sonnet 5.5 with
 # the v2 prompt kept alien novelty into the code (+1.07 code novelty, paired), DeepSeek with v2 did not.
@@ -179,7 +247,7 @@ def main(argv=None):
     if reasoning == "auto":
         reasoning = "on" if re.search(r"claude-(sonnet|opus)", args.model) else "off"
     os.environ["UNCHARTED_REASONING"] = reasoning
-    max_tokens = args.max_tokens or (16000 if args.prompt == "v2" else 6000)
+    max_tokens = args.max_tokens or (6000 if args.prompt == "v1" else 16000)
     support = None if args.max_support < 0 else load_support(args.support or DEFAULT_SUPPORT, bool(args.support))
 
     reg = Registry(args.out)
