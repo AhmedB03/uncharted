@@ -18,6 +18,7 @@ The alien factory:
     support     Count how many repos of a bigger corpus share each technique triple
     rank        Rank every technique triple from those counts (no trained model needed)
     demand      Most upvoted open requests across the corpus repos (what people ask for)
+    demand-spec Spec a standalone tool from one of those requests (then `build` as usual)
     spec-experiment  Re-spec top verified-alien ideas with a stricter prompt and compare
     judge       Blind quality scores for benchmark builds (novelty, substance, ...)
 
@@ -50,6 +51,7 @@ COMMANDS = {
     "support": "uncharted.support",
     "rank": "uncharted.rank",
     "demand": "uncharted.demand",
+    "demand-spec": "uncharted.factory.demand_spec",
     "spec": "uncharted.factory.spec",
     "build": "uncharted.factory.build",
     "publish": "uncharted.factory.publish",
