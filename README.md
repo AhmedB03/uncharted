@@ -82,6 +82,7 @@ python uncharted.py gallery --refresh-stars                  # factory_out/galle
 * **spec** asks the model to design one standard library Python project that uses every technique in the combination, or to say honestly that none fits. The default (v2) prompt makes it name the closest existing tool and beat it, and forbids "simulated" stand-ins for a technique. Combinations that any repo in the big corpus (`data/support_big.json`, from `support`) already contains are skipped; `--max-support -1` turns that off, `--prompt v1 --model gemini/gemini-3.8-flash` gives the old free-tier setup.
 * **build** has the model write the code and tests, runs pytest, sends failures back, and repeats up to 8 times. Weak tests (no real assertions, `assert True`) are rejected and sent back too.
 * **publish** pushes passing projects to GitHub with a README that says plainly they were invented and built by AI, tagged `ai-generated`. It is capped per day so the org never looks like spam.
+* **demand** starts from what people ask for instead of from techniques: `python uncharted.py demand` pulls each corpus repo's most upvoted open issues (GitHub API only, resumable, stored in `data/demand/`) and writes `results/demand.md`, the top requests by thumbs-up with bug reports left out.
 * **gallery** is a static page of everything, failures included, ranked by stars. Host it on GitHub Pages.
 
 Everything lands in `factory_out/registry.json`, which becomes the dataset: which kinds of alien combinations get built, which fail, and which people actually star.
