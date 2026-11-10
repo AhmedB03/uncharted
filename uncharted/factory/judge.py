@@ -255,7 +255,7 @@ def main(argv=None):
         caches[out] = (cache_path, cache)
         for slug, idea in reg.ideas.items():
             wanted = ("built", "failed", "infeasible", "spec") if args.combos else ("built", "failed", "spec") if args.specs else ("built",)
-            if idea.get("status") not in wanted or idea.get("arm") not in ("common", "alien"):
+            if idea.get("status") not in wanted or idea.get("arm") not in ("common", "alien", "demand"):
                 continue
             key = f"{args.model}::{slug}"
             if key in cache and cache[key].get("filtered"):
