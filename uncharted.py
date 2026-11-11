@@ -19,6 +19,7 @@ The alien factory:
     rank        Rank every technique triple from those counts (no trained model needed)
     demand      Most upvoted open requests across the corpus repos (what people ask for)
     demand-spec Spec a standalone tool from one of those requests (then `build` as usual)
+    explore     Novelty search: extend built projects by one technique, with no target
     spec-experiment  Re-spec top verified-alien ideas with a stricter prompt and compare
     judge       Blind quality scores for benchmark builds (novelty, substance, ...)
 
@@ -52,6 +53,7 @@ COMMANDS = {
     "rank": "uncharted.rank",
     "demand": "uncharted.demand",
     "demand-spec": "uncharted.factory.demand_spec",
+    "explore": "uncharted.factory.explore",
     "spec": "uncharted.factory.spec",
     "build": "uncharted.factory.build",
     "publish": "uncharted.factory.publish",

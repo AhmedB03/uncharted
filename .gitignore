@@ -10,3 +10,4 @@ third_party/
 factory_out/
 *.log
 repos_big/
+repos_fun/

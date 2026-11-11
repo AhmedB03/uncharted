@@ -36,17 +36,20 @@ def repo_id(full_name):
     return full_name.replace("/", "__")
 
 
-def search(gh, target, min_stars, pushed_after, languages):
+def search(gh, target, min_stars, pushed_after, languages, topics=()):
     """Spread the target across languages so the corpus is not all Python and JS.
+
+    With `topics`, the target is spread across GitHub topics instead (any language), which picks
+    the corpus by subject: games, generative art, music and so on.
 
     GitHub search returns at most 1000 results per query, so each language is
     capped there; we then fill any leftover quota round robin.
     """
-    quota = max(1, target // len(languages))
+    slices = [(t, f"topic:{t}") for t in topics] or [(lang, f'language:"{lang}"') for lang in languages]
+    quota = max(1, target // len(slices))
     seen, picked = set(), []
-    for lang in languages:
-        q = (f'language:"{lang}" stars:>={min_stars} pushed:>={pushed_after} '
-             f"fork:false archived:false")
+    for lang, qualifier in slices:
+        q = f"{qualifier} stars:>={min_stars} pushed:>={pushed_after} fork:false archived:false"
         got = 0
         for page in range(1, 11):
             data = gh.json("/search/repositories",
@@ -63,7 +66,7 @@ def search(gh, target, min_stars, pushed_after, languages):
                     break
             if got >= quota or len(data["items"]) < 100:
                 break
-        print(f"  {lang:<11} {got} repos")
+        print(f"  {lang:<22} {got} repos")
         if len(picked) >= target:
             break
     return picked[:target]
@@ -134,6 +137,8 @@ def main(argv=None):
     p.add_argument("--min-stars", type=int, default=300)
     p.add_argument("--pushed-after", default="2025-01-01")
     p.add_argument("--languages", nargs="*", default=LANGUAGES)
+    p.add_argument("--topics", nargs="*", default=[],
+                   help="Pick repos by GitHub topic instead of by language, e.g. game generative-art")
     p.add_argument("--min-contributions", type=int, default=3,
                    help="Drop contributors below this many commits (filters drive by typo fixes)")
     p.add_argument("--workers", type=int, default=8)
@@ -144,7 +149,7 @@ def main(argv=None):
     gh = GitHub()
 
     print(f"Searching for {args.target} repos...")
-    items = search(gh, args.target, args.min_stars, args.pushed_after, args.languages)
+    items = search(gh, args.target, args.min_stars, args.pushed_after, args.languages, args.topics)
     (out_dir / "_search.json").write_text(json.dumps([i["full_name"] for i in items], indent=1))
     print(f"Found {len(items)} repos, fetching details with {args.workers} workers")
 

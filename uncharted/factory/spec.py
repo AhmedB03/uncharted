@@ -167,9 +167,73 @@ WITH_LIBS = ("- Python 3.11, its standard library, and ONLY these installed pack
   When one of them already implements a technique properly (e.g. aioquic for QUIC, cryptography for
   TLS-grade crypto), use it rather than re-implementing it, and spend the code on what is new.""")
 
+# The Python prompts above turn every combination into developer plumbing, because a standard
+# library CLI is all they are allowed to ask for. `web` asks for something a stranger would open
+# and play with: one static page, built by web.WebTarget and tested in headless Chrome. Use it with
+# clusters made from a corpus picked by subject (`collect --topics game generative-art music ...`).
+PROMPT_WEB = """You design small things that people open in a browser tab and do not want to close: toys,
+games, instruments, simulations, generators.
+
+These three techniques come from popular open source games, creative coding, music and
+visualization projects. They were checked against about 3,000 such repos: none uses all three.
+
+TECHNIQUES (with repos where each normally shows up):
+{atoms}
+
+Work in this order, and be honest at each step:
+1. Picture a stranger who opens a link to this page with no instructions. Say what they see in
+   the first second, and what they are doing ten seconds later.
+2. Say why they are still there after five minutes, and why they send the link to a friend. That
+   hook has to come from the three techniques working on each other, not from one of them alone.
+3. Name the closest existing thing (a game, a toy, a site) and what yours does that it does not.
+4. Design the smallest version that really delivers the hook.
+If the combination only makes a tech demo, or one of the techniques cannot be done for real inside
+one offline web page, set "feasible" to false and say why. A small thing that is fun beats a
+clever tour of the techniques.
+
+Realness rules (a reviewer will read the code and play the page):
+- Every technique must be implemented for real, in miniature if need be (a real rollback buffer,
+  a real wave function collapse solver, a real FM synthesis voice). Never a renamed counter or a
+  random number standing in for it. Never call anything "simulated", "mock" or "demo".
+
+Hard constraints (the page is built and tested automatically in headless Chrome):
+- One static web page: index.html plus vanilla JavaScript modules. No framework, library, build
+  step, server, network, account or asset file. Graphics are drawn in code (Canvas 2D, WebGL or
+  SVG) and sound is synthesized with Web Audio.
+- One player on one device. Mouse or touch must be enough to play; keys are a bonus.
+- It works the moment it opens: no menu, no setup, no tutorial wall. The first click, drag or
+  key press does something visible.
+- About 500 to 1200 lines of JavaScript.
+- The rules, generation and simulation are plain functions of a seed and the inputs, kept apart
+  from the drawing, so they can be tested exactly without a screen.
+
+Return only JSON:
+{{
+  "feasible": true,
+  "first_ten_seconds": "what a stranger sees and does, from step 1",
+  "hook": "why they stay and why they share it, from step 2",
+  "closest_existing": "the closest existing thing, and what yours adds",
+  "slug": "short-kebab-case-name",
+  "title": "Readable Name",
+  "pitch": "one sentence that would make a stranger click the link",
+  "why_unusual": "one sentence: why nobody would normally build this",
+  "kind": "web",
+  "controls": "how to play: mouse or touch first, then keys",
+  "features": ["3 to 6 concrete features, each naming the real mechanism it uses"],
+  "tests": ["6 to 12 specific behaviors the test suite must check"]
+}}
+
+Each entry in "tests" must be a concrete input -> expected output check on the rules, generation
+or simulation that a unit test can assert exactly (e.g. "one step turns the column [[0,1,0],
+[0,1,0],[0,1,0]] into the row [[0,0,0],[1,1,1],[0,0,0]]", "seed 42 gives the same level twice and
+seed 43 gives a different one"). At least two tests must exercise the techniques working
+together. Never list how it looks, sounds or feels, frame rate, "responsive", or anything that
+needs a screen or a speaker: the page itself is checked separately."""
+
 PROMPTS = {"v1": PROMPT, "v2": PROMPT_V2,
            "v3": PROMPT_V3.replace("{libs}", STDLIB_ONLY),
-           "v3lib": PROMPT_V3.replace("{libs}", WITH_LIBS)}
+           "v3lib": PROMPT_V3.replace("{libs}", WITH_LIBS),
+           "web": PROMPT_WEB}
 
 # The spec experiment (results/spec_experiment.md) found the spec model is the lever: Sonnet 5.5 with
 # the v2 prompt kept alien novelty into the code (+1.07 code novelty, paired), DeepSeek with v2 did not.

@@ -10,6 +10,11 @@ original clustering (80% by default); agreement with the original labels is repo
 you can see how faithful the mapping is.
 
     python uncharted.py support --repos repos_big --out data/support_big.json
+
+When the clusters were themselves made from a few thousand repos, there is nothing to map: `--self`
+counts on that same corpus with the labels the clustering gave it.
+
+    python uncharted.py support --self --clusters data/fun/clusters_80.json --out data/fun/support.json
 """
 
 import argparse
@@ -47,22 +52,28 @@ def main(argv=None):
     p.add_argument("--embedding-model", default="BAAI/bge-large-en-v1.5")
     p.add_argument("--coverage", type=float, default=0.80)
     p.add_argument("--out", default="data/support_big.json")
+    p.add_argument("--self", dest="own", action="store_true",
+                   help="Count on the corpus the clusters were made from, using its own labels (no embedding)")
     args = p.parse_args(argv)
 
-    emb_path = args.embeddings or str(Path(args.clusters).with_suffix(".npy"))
-    data, old_emb, old_labels, ids, cents = centroids(args.clusters, emb_path)
+    if args.own:
+        atoms = json.loads(Path(args.clusters).read_text())["atom_assignments"]
+        labels, cut, agreement = [a["cluster"] for a in atoms], None, 1.0
+    else:
+        emb_path = args.embeddings or str(Path(args.clusters).with_suffix(".npy"))
+        data, old_emb, old_labels, ids, cents = centroids(args.clusters, emb_path)
 
-    # Faithfulness check on the original atoms: does nearest centroid reproduce their label?
-    pred, _ = nearest(old_emb, ids, cents)
-    kept = old_labels != -1
-    agreement = float((pred[kept] == old_labels[kept]).mean())
+        # Faithfulness check on the original atoms: does nearest centroid reproduce their label?
+        pred, _ = nearest(old_emb, ids, cents)
+        kept = old_labels != -1
+        agreement = float((pred[kept] == old_labels[kept]).mean())
 
-    atoms = load_atoms(args.repos)
-    print(f"{len(atoms)} atoms from {len({a['paper_id'] for a in atoms})} repos; embedding...")
-    emb = embed([a["text"] for a in atoms], "bge", args.embedding_model)
-    best, conf = nearest(np.asarray(emb), ids, cents)
-    cut = float(np.quantile(conf, 1 - args.coverage))
-    labels = np.where(conf >= cut, best, -1)
+        atoms = load_atoms(args.repos)
+        print(f"{len(atoms)} atoms from {len({a['paper_id'] for a in atoms})} repos; embedding...")
+        emb = embed([a["text"] for a in atoms], "bge", args.embedding_model)
+        best, conf = nearest(np.asarray(emb), ids, cents)
+        cut = round(float(np.quantile(conf, 1 - args.coverage)), 4)
+        labels = np.where(conf >= cut, best, -1)
 
     by_repo = defaultdict(set)
     for a, c in zip(atoms, labels):
@@ -71,7 +82,7 @@ def main(argv=None):
     triples = Counter(t for cs in by_repo.values() for t in itertools.combinations(sorted(cs), 3))
     out = {
         "summary": {"repos": len(by_repo), "atoms": len(atoms), "coverage": args.coverage,
-                    "similarity_cutoff": round(cut, 4),
+                    "similarity_cutoff": cut,
                     "label_agreement_on_original_atoms": round(agreement, 4),
                     "distinct_triples": len(triples),
                     "triple_support_histogram": dict(sorted(Counter(triples.values()).items()))},

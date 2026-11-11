@@ -65,6 +65,67 @@ If this turns out to be useful, a star tells the experiment that this kind of co
 """
 
 
+# A web project (spec --prompt web) is a page, so its README leads with the link that plays it.
+WEB_README = """# {title}
+
+**[Play it in your browser]({page_url})** (nothing to install, no account, works offline)
+
+[![{title}](screenshot.png)]({page_url})
+
+{pitch}
+
+**How to play:** {controls}
+
+**Created by {author_md}** with [Uncharted]({uncharted_url}).
+
+> **Invented and built by AI, published by a human.** {author} built and ran Uncharted, a system that
+> finds technique combinations that make sense but that no existing project combines. A language model
+> ({spec_model}) designed this page from one such combination, and another ({build_model}) wrote
+> the code and iterated until its tests passed in a real browser. {author} chose it for publication;
+> no human wrote the code line by line. Treat it as an experiment.
+
+**Why this is unusual:** {why_unusual}
+{closest}
+## The combination
+
+| Technique | Normally found in |
+| --- | --- |
+{atom_rows}
+
+{evidence}
+
+## What is in it
+
+{features}
+
+## Run it yourself
+
+It is one static page of plain JavaScript: no dependencies and no build step.
+
+```
+python -m http.server 8000
+```
+
+Then open http://localhost:8000 to play, or http://localhost:8000/tests/ to run the tests in your browser.
+
+## Build record
+
+* {tests_passed} checks passing, {loc} lines of code
+* Reached passing tests after {iterations} build iteration(s)
+* Published {date}
+
+If you had fun with it, a star tells the experiment that this kind of combination works.
+"""
+
+
+def is_web(idea):
+    return idea.get("target") == "web"
+
+
+def page_url(org, slug):
+    return f"https://{org.lower()}.github.io/{slug}/"
+
+
 def gh(*args, cwd=None):
     return subprocess.run(["gh", *args], cwd=cwd, capture_output=True, text=True)
 
@@ -93,7 +154,8 @@ def evidence_text(idea):
     return " ".join(parts)
 
 
-def write_readme(root, idea, uncharted_url, author, author_url=None):
+def write_readme(root, idea, uncharted_url, author, author_url=None, page=None):
+    """README, LICENSE and .gitignore. `page` is the live URL of a web project."""
     spec = idea["spec"]
     examples = idea.get("example_repos", {})
     rows = "\n".join(
@@ -101,7 +163,8 @@ def write_readme(root, idea, uncharted_url, author, author_url=None):
         for a in idea["atoms"])
     closest = spec.get("closest_existing")
     handle = author_url.rstrip("/").rsplit("/", 1)[-1] if author_url else None
-    (root / "README.md").write_text(README.format(
+    (root / "README.md").write_text((WEB_README if page else README).format(
+        page_url=page, controls=spec.get("controls", "click, drag or press a key"),
         title=spec.get("title", idea["slug"]), uncharted_url=uncharted_url, author=author,
         author_md=f"{author} ([{handle}]({author_url}))" if author_url else author,
         spec_model=pretty_model(idea.get("spec_model")), build_model=pretty_model(idea.get("build_model")),
@@ -113,7 +176,10 @@ def write_readme(root, idea, uncharted_url, author, author_url=None):
         tests_passed=idea.get("tests_passed", 0), loc=idea.get("loc", 0),
         iterations=idea.get("iterations", 1), date=datetime.now(timezone.utc).date().isoformat(),
     ), encoding="utf-8")
-    (root / ".gitignore").write_text("__pycache__/\n.pytest_cache/\n")
+    if page:
+        (root / ".nojekyll").write_text("")  # GitHub Pages: serve the files as they are
+    else:
+        (root / ".gitignore").write_text("__pycache__/\n.pytest_cache/\n")
     (root / "LICENSE").write_text(MIT.format(year=datetime.now(timezone.utc).year, author=author))
 
 
@@ -150,10 +216,12 @@ def main(argv=None):
 
     for slug in ready[:room]:
         idea, root = reg.ideas[slug], reg.project_dir(slug)
-        write_readme(root, idea, args.uncharted_url, author, author_url)
+        page = page_url(args.org, slug) if is_web(idea) else None
+        write_readme(root, idea, args.uncharted_url, author, author_url, page)
         name = f"{args.org}/{slug}"
         if not args.yes:
-            print(f"  would publish {name} (credited to {author}): {idea['spec'].get('pitch', '')}")
+            print(f"  would publish {name} (credited to {author}): {idea['spec'].get('pitch', '')}"
+                  + (f"\n    playable at {page}" if page else ""))
             continue
         for cmd in (["git", "init", "-q", "-b", "main"], ["git", "add", "."],
                     ["git", "commit", "-q", "-m", "Initial commit: invented and built with Uncharted"]):
@@ -166,9 +234,15 @@ def main(argv=None):
             print(f"  failed {name}: {r.stderr.strip()}")
             continue
         gh("repo", "edit", name, "--add-topic", "ai-generated", "--add-topic", "uncharted-factory")
+        if page:
+            # Serve the repo root with GitHub Pages, so the README's link plays the page.
+            r = gh("api", "-X", "POST", f"repos/{name}/pages", "-f", "source[branch]=main", "-f", "source[path]=/")
+            if r.returncode != 0:
+                print(f"  could not turn on GitHub Pages for {name} (do it in the repo settings): {r.stderr.strip()}")
+            gh("repo", "edit", name, "--homepage", page, "--add-topic", "browser-game")
         reg.update(slug, status="published", repo=name, repo_url=f"https://github.com/{name}",
-                   published_at=now(), stars=0)
-        print(f"  published https://github.com/{name}")
+                   published_at=now(), stars=0, **({"page_url": page} if page else {}))
+        print(f"  published https://github.com/{name}" + (f" (plays at {page} once Pages has deployed)" if page else ""))
     if not args.yes:
         print("Dry run. Add --yes to publish.")
 

@@ -83,9 +83,37 @@ python uncharted.py gallery --refresh-stars                  # factory_out/galle
 * **build** has the model write the code and tests, runs pytest, sends failures back, and repeats up to 8 times. Weak tests (no real assertions, `assert True`) are rejected and sent back too.
 * **publish** pushes passing projects to GitHub with a README that says plainly they were invented and built by AI, tagged `ai-generated`. It is capped per day so the org never looks like spam.
 * **demand** starts from what people ask for instead of from techniques: `python uncharted.py demand` pulls each corpus repo's most upvoted open issues (GitHub API only, resumable, stored in `data/demand/`) and writes `results/demand.md`, the top requests by thumbs-up with bug reports left out.
+* **explore** drops the target altogether, after Stanley and Lehman's *Why Greatness Cannot Be Planned*. Every built project in its archive (`factory_out/explore`, seeded with `--seed <other registries>`) is a stepping stone. Each step proposes children that are a stone plus one technique, built from the stone's real code, and picks them for novelty alone: how far their technique set is from everything already in the archive, failures included. The only bars are minimal (the new technique goes with one of the stone's techniques more often than chance, and the child has to build). Alternate `explore --n 5` and `build --out factory_out/explore`; `explore --tree` prints who descends from whom, `--dry-run` shows the picks for free.
 * **gallery** is a static page of everything, failures included, ranked by stars. Host it on GitHub Pages.
 
 Everything lands in `factory_out/registry.json`, which becomes the dataset: which kinds of alien combinations get built, which fail, and which people actually star.
+
+### Web pages instead of command line tools
+
+A corpus of popular repos in general, built as standard library Python, yields developer plumbing. Two switches change what comes out:
+
+```bash
+# 1. pick the corpus by subject instead of by language
+python uncharted.py collect --out repos_fun --min-stars 100 --topics game roguelike generative-art creative-coding synthesizer simulation ...
+python uncharted.py atomize --repos repos_fun --prompt play --model openrouter/anthropic/claude-haiku-5.5 --rpm 400
+python uncharted.py cluster --repos repos_fun --out data/fun/clusters_80.json --min-cluster-size 12
+python uncharted.py support --self --clusters data/fun/clusters_80.json --out data/fun/support.json
+python uncharted.py rank    --bridge --min-repos 13 --support data/fun/support.json \
+                            --clusters data/fun/clusters_80.json --out results/ranked_fun/results.json
+
+# 2. spec and build one static web page per combination
+pip install playwright           # drives the Chrome or Edge already on the machine
+python uncharted.py spec  --prompt web --results results/ranked_fun/results.json --clusters data/fun/clusters_80.json \
+                          --support data/fun/support.json --out factory_out/fun
+python uncharted.py build --out factory_out/fun --model openrouter/anthropic/claude-haiku-5.5
+```
+
+* **atomize --prompt play** lists game mechanics and generative techniques ("falling sand cellular automaton", "rhythm timing windows scored against a beat map") instead of engineering ones, and skips engines, build systems and asset pipelines. About 3,000 repos cost $1.35 on Haiku 5.5.
+* **rank --bridge** keeps only open triangles: two techniques that each go with a middle one but have never shared a repo. Without it the top of the list stays inside one field (three audio techniques, or dungeon generation with pathfinding and fog of war).
+* **spec --prompt web** asks for something a stranger would open and play with: a toy, game, instrument or simulation as one page of plain JavaScript, with no library, server or asset file. The rules and generation have to be plain functions of a seed, so the acceptance checklist can still be exact.
+* **build** then works in a real browser instead of pytest. The project's tests run inside a page (`tests/index.html`, with a small assertion harness the factory supplies), and afterwards `index.html` itself is opened, clicked, dragged and typed at. To count as built it must draw something at once, change in response, throw no errors, request nothing outside its own folder, and load the same modules its tests check. Headless Chrome is the sandbox: files are served to it from disk under a made-up origin and every other request is refused, so Docker is not needed. A `screenshot.png` of the page is left in the project.
+* **publish** gives a web project a README that leads with the play link and turns on GitHub Pages for the repo.
+* Mark techniques that cannot be done inside one offline page (a native engine, a multiplayer server) with `"buildable": false` in `data/fun/clusters_80.names.json` and `rank` leaves them out.
 
 ## The benchmark: do models get worse in the alien space?
 

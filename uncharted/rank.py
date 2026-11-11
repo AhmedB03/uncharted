@@ -9,8 +9,14 @@ bigger corpus, the counts can be used directly and over the whole space:
               All three pairs must go together more often than chance for a high score.
   unbuilt     no corpus repo contains all three (`--max-support`).
 
-Techniques marked `"stdlib": false` in `<clusters>.names.json` are left out (see `show.load_overrides`),
-each technique appears in at most `--max-per-technique` picks so the list stays varied, and the list
+Ranked that way, the top of the list stays inside one field (three audio techniques, or dungeon
+generation with pathfinding and fog of war), because those are the pairs that go together most.
+`--bridge` asks for open triangles instead: two techniques that each go with a middle one but have
+never shared a repo with each other. The score is the weaker of the two links that do exist.
+
+Techniques marked `"stdlib": false` (or, for a corpus built for another target such as web pages,
+`"buildable": false`) in `<clusters>.names.json` are left out (see `show.load_overrides`), each
+technique appears in at most `--max-per-technique` picks so the list stays varied, and the list
 stops where the weakest pair no longer beats chance (`--min-pmi`).
 
 The output has the sampler's results.json shape, so `show`, `spec` and `benchmark` read it as is:
@@ -40,8 +46,13 @@ def pmi(a, b, freq, pairs, n):
     return math.log((pairs[(a, b)] + 1) / (freq[a] * freq[b] / n + 1))
 
 
-def rank(support, top=300, max_support=0, min_repos=40, exclude=(), max_per_technique=12, min_pmi=0.0):
-    """Best-first list of (triple, weakest pair PMI, mean pair PMI, repo support), and how many were scored."""
+def rank(support, top=300, max_support=0, min_repos=40, exclude=(), max_per_technique=12, min_pmi=0.0,
+         bridge=False):
+    """Best-first list of (triple, weakest pair PMI, mean pair PMI, repo support), and how many were scored.
+
+    With `bridge`, only open triangles count: one pair has never shared a repo, and the score is the
+    weaker of the other two pairs. The middle technique goes with both ends, the ends have never met.
+    """
     freq, pairs, n = pair_stats(support["repo_clusters"])
     known = support["triple_support"]
     skip = set(exclude)
@@ -52,8 +63,13 @@ def rank(support, top=300, max_support=0, min_repos=40, exclude=(), max_per_tech
         sup = known.get(",".join(map(str, t)), 0)
         if max_support >= 0 and sup > max_support:
             continue
-        e = [edge[p] for p in itertools.combinations(t, 2)]
-        scored.append((min(e), sum(e) / 3, t, sup))
+        sides = list(itertools.combinations(t, 2))
+        if bridge:
+            sides = [p for p in sides if pairs[p]]
+            if len(sides) != 2:
+                continue
+        e = [edge[p] for p in sides]
+        scored.append((min(e), sum(e) / len(e), t, sup))
     scored.sort(key=lambda x: (-x[0], -x[1], x[2]))
     used, out = Counter(), []
     for weakest, mean, t, sup in scored:
@@ -79,15 +95,19 @@ def main(argv=None):
     p.add_argument("--max-per-technique", type=int, default=12, help="0 turns the variety cap off")
     p.add_argument("--min-pmi", type=float, default=0.0,
                    help="Stop once the weakest pair is below this (default 0: every pair beats chance)")
+    p.add_argument("--bridge", action="store_true",
+                   help="Only open triangles: two techniques that each go with the third but have never "
+                        "shared a repo with each other (mixes fields instead of staying inside one)")
     p.add_argument("--all-techniques", action="store_true",
                    help="Keep techniques marked as not buildable in standard library Python")
     args = p.parse_args(argv)
 
     support = json.loads(Path(args.support).read_text())
     overrides = load_overrides(args.clusters)
-    exclude = [] if args.all_techniques else [c for c, o in overrides.items() if o.get("stdlib") is False]
+    exclude = [] if args.all_techniques else [c for c, o in overrides.items()
+                                              if o.get("stdlib") is False or o.get("buildable") is False]
     picks, n_scored = rank(support, args.top, args.max_support, args.min_repos, exclude, args.max_per_technique,
-                            args.min_pmi)
+                            args.min_pmi, args.bridge)
     if not picks:
         raise SystemExit("No combination passed the filters; lower --min-repos or raise --max-support.")
 
@@ -99,7 +119,9 @@ def main(argv=None):
              # the fields `spec` and `benchmark` record; unavailability is not modelled here
              "z_coherence": round((w - mu) / sd, 4), "z_availability": 0.0}
             for i, (t, w, m, sup) in enumerate(picks, 1)]
-    out = {"config": {"method": "weakest pair PMI over all triples", "support": args.support,
+    method = ("weaker link PMI over open triangles (one pair never seen together)" if args.bridge
+              else "weakest pair PMI over all triples")
+    out = {"config": {"method": method, "support": args.support,
                       "corpus_repos": len(support["repo_clusters"]), "max_support": args.max_support,
                       "min_repos": args.min_repos, "max_per_technique": args.max_per_technique, "min_pmi": args.min_pmi,
                       "excluded_techniques": sorted(exclude), "n_candidate_sets": n_scored},

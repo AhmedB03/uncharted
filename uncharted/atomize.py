@@ -15,7 +15,7 @@ import json
 import re
 from pathlib import Path
 
-from uncharted.llm import DEFAULT_MODEL
+from uncharted.llm import DEFAULT_MODEL, reasoning_off
 
 PROMPT = """You are building a vocabulary of reusable software techniques.
 
@@ -48,16 +48,62 @@ README:
 """
 
 
-def build_prompt(d, min_atoms, max_atoms):
-    meta = json.loads((d / "meta.json").read_text())
+# For a corpus picked by subject (`collect --topics game generative-art music ...`). The prompt
+# above turns a roguelike into "entity component system" and "Lua scripting bindings"; this one
+# asks what it is like to play with and what produces that, so combinations of its atoms read as
+# things to play rather than engine plumbing.
+PLAY_PROMPT = """You are building a vocabulary of the ideas that make software fun to use: game mechanics,
+generative and simulation techniques, ways of making pictures and sound, ways of interacting.
+
+Read this GitHub repository and list the {min_atoms} to {max_atoms} distinct ideas that define what it
+is like to use and how it produces that.
+
+Rules for each atom:
+- A short noun phrase, 3 to 10 words, phrased so it could be reused in a completely different
+  project. Good: "wave function collapse level generation", "rhythm timing windows scored against
+  a beat map", "falling sand cellular automaton", "FM synthesis voice with envelopes", "deck
+  building with permanent death", "force directed graph layout", "replay by re-simulating
+  recorded inputs".
+- Name the mechanic or the technique, never the product, a genre label or a franchise ("turn
+  based tactics on a hex grid", not "a Civilization clone").
+- Prefer what a player sees, hears or does, and the algorithm behind it, over engineering
+  plumbing. Skip: the language, the engine or framework it uses, build systems, cross platform
+  support, plugin and modding systems, asset pipelines, file formats, server infrastructure,
+  "open source", tests, documentation, licenses.
+- If the repository is only plumbing (a list of links, a build tool, a binding), return fewer
+  atoms, or none.
+- No two atoms should say the same thing.
+- Mark each atom "core" if the project is built around it, "supporting" otherwise.
+
+Return only JSON: {{"atoms": [{{"atom": "...", "role": "core"}}]}}
+
+REPOSITORY: {full_name}
+LANGUAGE: {language}
+TOPICS: {topics}
+DESCRIPTION: {description}
+
+DEPENDENCY MANIFESTS:
+{deps}
+
+README:
+{readme}
+"""
+
+# (prompt, how many characters of dependency manifests it is shown)
+PROMPTS = {"tech": (PROMPT, 6000), "play": (PLAY_PROMPT, 1200)}
+
+
+def build_prompt(d, min_atoms, max_atoms, style="tech"):
+    meta = json.loads((d / "meta.json").read_text(encoding="utf-8"))
     readme = (d / "readme.md").read_text(encoding="utf-8") if (d / "readme.md").exists() else ""
     deps = (d / "deps.txt").read_text(encoding="utf-8") if (d / "deps.txt").exists() else ""
-    return PROMPT.format(
+    prompt, deps_chars = PROMPTS[style]
+    return prompt.format(
         min_atoms=min_atoms, max_atoms=max_atoms,
         full_name=meta["full_name"], language=meta.get("language") or "unknown",
         topics=", ".join(meta.get("topics", [])) or "none",
         description=meta.get("description") or "none",
-        deps=deps[:6000] or "none", readme=readme[:10000] or "none",
+        deps=deps[:deps_chars] or "none", readme=readme[:10000] or "none",
     )
 
 
@@ -151,7 +197,10 @@ async def atomize_one(d, args, sem, completion):
     if args.mock:
         atoms = mock_atoms(d)
     else:
-        prompt = build_prompt(d, args.min_atoms, args.max_atoms)
+        prompt = build_prompt(d, args.min_atoms, args.max_atoms, args.prompt)
+        extra = reasoning_off(args.model)  # hidden reasoning would use up the 800 tokens
+        if args.model.startswith("ollama"):
+            extra["format"] = "json"  # local models: force valid JSON output
         async with sem:
             last = None
             for attempt in range(4):
@@ -160,9 +209,7 @@ async def atomize_one(d, args, sem, completion):
                     resp = await completion(
                         model=args.model,
                         messages=[{"role": "user", "content": prompt}],
-                        temperature=0.2, max_tokens=800,
-                        # local Ollama models: force valid JSON output
-                        **({"format": "json"} if args.model.startswith("ollama") else {}),
+                        temperature=0.2, max_tokens=800, timeout=120, **extra,
                     )
                     atoms = parse_atoms(resp.choices[0].message.content)
                     break
@@ -212,6 +259,9 @@ def main(argv=None):
     p.add_argument("--concurrency", type=int, default=8)
     p.add_argument("--min-atoms", type=int, default=3)
     p.add_argument("--max-atoms", type=int, default=8)
+    p.add_argument("--prompt", choices=sorted(PROMPTS), default="tech",
+                   help="tech: engineering techniques (default). play: mechanics and generative techniques, "
+                        "for a corpus of games, creative coding and music")
     p.add_argument("--limit", type=int, default=0, help="Only process the first N repos")
     p.add_argument("--force", action="store_true", help="Redo repos that already have atoms")
     p.add_argument("--mock", action="store_true", help="Heuristic atoms, no API calls")

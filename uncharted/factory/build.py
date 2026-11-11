@@ -1,8 +1,9 @@
-"""Build each spec: the model writes code, pytest runs, failures go back, repeat.
+"""Build each spec: the model writes code, the tests run, failures go back, repeat.
 
-Generated code runs inside Docker with no network when Docker is installed.
+Generated Python runs inside Docker with no network when Docker is installed.
 Without Docker it runs as a local subprocess, so only do that on a machine you
-do not mind an AI's code running on.
+do not mind an AI's code running on. Web specs (`spec --prompt web`) are built as
+one static page and tested in headless Chrome with the network cut off; see web.py.
 
     python uncharted.py build --max 5
     python uncharted.py build --slug some-project --max-iters 8
@@ -18,6 +19,7 @@ import sys
 from pathlib import Path
 
 from uncharted import llm
+from uncharted.factory import web
 from uncharted.factory.registry import Registry
 
 # Bump the tag whenever runner/Dockerfile changes: docker_ready() only builds a missing image.
@@ -30,6 +32,8 @@ LIB_IMPORTS = {"numpy": "numpy", "cryptography": "cryptography", "aioquic": "aio
                "lark": "lark", "pillow": "PIL", "msgpack": "msgpack", "zstandard": "zstandard",
                "pyyaml": "yaml", "tomli-w": "tomli_w"}
 LIB_PROMPTS = {"v3lib"}
+# Specs written with these prompts are web pages, built and tested by web.WebTarget.
+WEB_PROMPTS = {"web"}
 
 
 def allowed_imports(idea):
@@ -92,7 +96,7 @@ SPEC:
 CURRENT FILES:
 {files}
 
-{hints}PYTEST OUTPUT (truncated):
+{hints}{label} (truncated):
 {output}
 
 """ + "{format}"
@@ -187,10 +191,20 @@ def apply(root, reply):
 SNAPSHOT_LIMIT = 200000
 
 
+# What counts as a project's source: Python projects hold only the first, web projects the rest.
+SOURCE_SUFFIXES = (".py", ".html", ".js", ".css")
+
+
+def source_files(root):
+    """The files the model wrote, leaving out the test harness the factory adds to web projects."""
+    return [p for p in root.rglob("*") if p.is_file() and p.suffix in SOURCE_SUFFIXES
+            and "__pycache__" not in p.parts and p.relative_to(root).as_posix() not in web.FACTORY_FILES]
+
+
 def snapshot(root, limit=SNAPSHOT_LIMIT, tests_last=False):
-    """All .py files as FILE blocks. tests_last puts package code before tests, so a reader
+    """All source files as FILE blocks. tests_last puts package code before tests, so a reader
     with a smaller limit loses tests rather than the code. Truncation is always marked."""
-    files = [p for p in root.rglob("*.py") if "__pycache__" not in p.parts]
+    files = source_files(root)
     key = (lambda p: ("tests" in p.relative_to(root).parts, p.as_posix())) if tests_last else (lambda p: p.as_posix())
     parts = [f"===== {p.relative_to(root).as_posix()} =====\n{p.read_text(encoding='utf-8')}"
              for p in sorted(files, key=key)]
@@ -200,14 +214,18 @@ def snapshot(root, limit=SNAPSHOT_LIMIT, tests_last=False):
     return text
 
 
+def state_files(root):
+    """Every text file of the project (the web runner's screenshot.png is not part of its state)."""
+    return [p for p in root.rglob("*") if p.is_file() and "__pycache__" not in p.parts and p.suffix != ".png"]
+
+
 def save_state(root):
-    return {p.relative_to(root).as_posix(): p.read_text(encoding="utf-8")
-            for p in root.rglob("*") if p.is_file() and "__pycache__" not in p.parts}
+    return {p.relative_to(root).as_posix(): p.read_text(encoding="utf-8") for p in state_files(root)}
 
 
 def restore_state(root, state):
-    for p in list(root.rglob("*")):
-        if p.is_file() and "__pycache__" not in p.parts and p.relative_to(root).as_posix() not in state:
+    for p in state_files(root):
+        if p.relative_to(root).as_posix() not in state:
             p.unlink()
     for rel, text in state.items():
         p = root / rel
@@ -274,7 +292,7 @@ def tests_look_real(root, pkg):
 
 def loc(root):
     return sum(len(p.read_text(encoding="utf-8").splitlines())
-               for p in root.rglob("*.py") if "__pycache__" not in p.parts and "tests" not in p.parts)
+               for p in source_files(root) if "tests" not in p.relative_to(root).parts)
 
 
 STDLIB_PROMPT = """This Python file imports {mods}, which are NOT in the Python 3.11 standard library and
@@ -347,17 +365,67 @@ def ask_and_apply(root, prompt, args, temperature):
                                     max_tokens=BUILD_MAX_TOKENS))
 
 
+PARENT_NOTE = """
+
+This project extends an existing one (`explore`). The existing project's working code is below.
+Start from it: keep and adapt what the spec still needs, under the new package name `{pkg}`, and
+return every file of the new project in full, including the ones you carry over.
+
+EXISTING PROJECT ({parent}):
+{files}"""
+
+
+def parent_code(reg, idea, pkg):
+    """For an `explore` child, the code of the stone it stands on, as an addition to the write prompt."""
+    parent = idea.get("parent")
+    if not parent or not reg.project_dir(parent).is_dir():
+        return ""
+    return PARENT_NOTE.format(pkg=pkg, parent=parent, files=snapshot(reg.project_dir(parent), tests_last=True))
+
+
+class PythonTarget:
+    """What build_one needs to know about a kind of project; web.WebTarget is the other kind."""
+    name = "python"
+    sandbox = None  # decided in main(): docker or local
+    output_label = "PYTEST OUTPUT"
+    fix_format = FIX_FORMAT
+    trivial = ("All tests pass but they look trivial: they must import the package and make at "
+               "least 3 real assertions about its outputs. Strengthen the tests, then fix the code.")
+
+    def write_prompt(self, spec, pkg, idea):
+        return WRITE_PROMPT.format(spec=spec, pkg=pkg, deps=deps_rule(allowed_imports(idea)),
+                                   format=FILE_FORMAT.format(pkg=pkg))
+
+    def prepare(self, root, pkg, args, idea):
+        """Runs before each test round; returns whatever it could not clean up, for the history."""
+        return purge_foreign_imports(root, pkg, args, allowed=allowed_imports(idea))
+
+    def run_tests(self, root, sandbox):
+        return run_tests(root, sandbox)
+
+    def tests_look_real(self, root, pkg):
+        return tests_look_real(root, pkg)
+
+    def hints(self, out, pkg, idea):
+        return stdlib_hints(out, pkg, allowed_imports(idea))
+
+
+def target_for(idea):
+    return web.WebTarget() if idea.get("spec_prompt") in WEB_PROMPTS else PythonTarget()
+
+
 def build_one(reg, slug, args, sandbox):
     idea = reg.ideas[slug]
     spec = json.dumps(idea["spec"], indent=2)
     pkg = pkg_name(slug)
+    target = target_for(idea)
+    sandbox = target.sandbox or sandbox
     root = reg.project_dir(slug)
     if root.exists():
         shutil.rmtree(root)
     root.mkdir(parents=True)
     history = []
-    allowed = allowed_imports(idea)
-    prompt = WRITE_PROMPT.format(spec=spec, pkg=pkg, deps=deps_rule(allowed), format=FILE_FORMAT.format(pkg=pkg))
+    prompt = target.write_prompt(spec, pkg, idea) + parent_code(reg, idea, pkg)
     try:
         ask_and_apply(root, prompt, args, temperature=0.3)
     except Exception as e:
@@ -368,8 +436,8 @@ def build_one(reg, slug, args, sandbox):
     checklist = idea["spec"].get("tests") or []
     best, best_score = None, None
     for it in range(1, args.max_iters + 1):
-        leftover = purge_foreign_imports(root, pkg, args, allowed=allowed)
-        passed, failed, out = run_tests(root, sandbox)
+        leftover = target.prepare(root, pkg, args, idea)
+        passed, failed, out = target.run_tests(root, sandbox)
         missing = spec_tests_missing(out, len(checklist)) if args.spec_gate else []
         if leftover:
             history.append({"iter": it, "foreign_imports": leftover})
@@ -391,12 +459,12 @@ def build_one(reg, slug, args, sandbox):
             best, best_score, best_out = save_state(root), score, (passed, failed, out)
 
         if failed == 0 and passed >= args.min_tests and not missing:
-            if not tests_look_real(root, pkg):
-                out = ("All tests pass but they look trivial: they must import the package and make at "
-                       "least 3 real assertions about its outputs. Strengthen the tests, then fix the code.")
+            if not target.tests_look_real(root, pkg):
+                out = target.trivial
             else:
                 reg.update(slug, status="built", iterations=it, tests_passed=passed, loc=loc(root),
                            history=history, package=pkg, build_model=args.model, sandbox=sandbox,
+                           target=target.name,
                            spec_checks=len(checklist) if args.spec_gate else None)
                 return "built"
         elif failed == 0 and passed < args.min_tests:
@@ -409,14 +477,14 @@ def build_one(reg, slug, args, sandbox):
             break
         shown = "\n".join(line for line in out.splitlines() if not line.startswith("PASSED "))
         try:
-            ask_and_apply(root, reverted + FIX_PROMPT.format(spec=spec, files=snapshot(root), output=shown[-8000:],
-                                                             hints=stdlib_hints(out, pkg, allowed), format=FIX_FORMAT),
-                          args, temperature=0.2)
+            ask_and_apply(root, reverted + FIX_PROMPT.format(
+                spec=spec, files=snapshot(root), output=shown[-8000:], label=target.output_label,
+                hints=target.hints(out, pkg, idea), format=target.fix_format), args, temperature=0.2)
         except Exception as e:
             history.append({"iter": it, "error": str(e)[:200]})
     if best is not None:
         restore_state(root, best)  # leave the best attempt on disk, not the last one
-    reg.update(slug, status="failed", iterations=len(history), history=history, package=pkg,
+    reg.update(slug, status="failed", iterations=len(history), history=history, package=pkg, target=target.name,
                fail_reason="tests or spec checks still failing after max iterations", build_model=args.model)
     return "failed"
 
@@ -438,8 +506,14 @@ def main(argv=None):
     p.add_argument("--rpm", type=int, default=8)
     args = p.parse_args(argv)
 
+    reg = Registry(args.out)
+    wanted = {"spec"} | ({"failed"} if args.retry_failed else set())
+    queue = [args.slug] if args.slug else [s for s, i in reg.ideas.items() if i["status"] in wanted]
+    queue = queue[: args.max]
+
     sandbox = args.sandbox
-    if sandbox in ("auto", "docker"):
+    # Web pages are tested in headless Chrome, so Docker only matters when a Python project is queued.
+    if sandbox in ("auto", "docker") and any(target_for(reg.ideas[s]).name == "python" for s in queue):
         if docker_ready():
             sandbox = "docker"
         elif sandbox == "docker":
@@ -451,11 +525,8 @@ def main(argv=None):
             import time
             time.sleep(5)
 
-    reg = Registry(args.out)
-    wanted = {"spec"} | ({"failed"} if args.retry_failed else set())
-    queue = [args.slug] if args.slug else [s for s, i in reg.ideas.items() if i["status"] in wanted]
     counts = {"built": 0, "failed": 0}
-    for slug in queue[: args.max]:
+    for slug in queue:
         print(f"  building {slug}: {reg.ideas[slug]['spec'].get('pitch', '')}")
         counts[build_one(reg, slug, args, sandbox)] += 1
     print(f"Done: {counts}")

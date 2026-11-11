@@ -17,7 +17,8 @@ def load_overrides(clusters_path):
     cluster ("pluggable transport protocols including QUIC and KCP" for general multi-protocol
     networking), and the spec writer takes names literally. Format:
     {"54": {"name": "...", "stdlib": true}}. "stdlib": false marks a technique that cannot be done
-    for real in standard library Python (a GPU, a GUI, an LLM); `rank` leaves those out.
+    for real in standard library Python (a GPU, a GUI, an LLM); `rank` leaves those out. For clusters
+    made for another build target (web pages), `"buildable": false` does the same.
     """
     path = Path(clusters_path).with_suffix(".names.json")
     if not path.is_file():

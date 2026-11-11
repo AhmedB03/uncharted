@@ -20,7 +20,7 @@ import json
 from collections import Counter
 from pathlib import Path
 
-from uncharted.llm import DEFAULT_MODEL
+from uncharted.llm import DEFAULT_MODEL, reasoning_off
 
 import numpy as np
 from sklearn.cluster import HDBSCAN
@@ -135,7 +135,7 @@ def _llm_names(clusters, model):
             for attempt in range(3):
                 try:
                     r = await acompletion(model=model, messages=[{"role": "user", "content": prompt}],
-                                          temperature=0.0, max_tokens=200)
+                                          temperature=0.0, max_tokens=200, timeout=120, **reasoning_off(model))
                     data = json.loads(re.search(r"\{.*\}", r.choices[0].message.content, re.S).group(0))
                     info["name"] = data["name"].strip()
                     info["description"] = data.get("description", "").strip()
@@ -160,6 +160,9 @@ def main(argv=None):
     p.add_argument("--min-cluster-size", type=int, default=5)
     p.add_argument("--min-samples", type=int, default=None)
     p.add_argument("--coverage", type=float, default=0.80)
+    p.add_argument("--reuse-embeddings", action="store_true",
+                   help="Skip embedding when the .npy next to --out matches the atoms (same corpus, same "
+                        "embedder): for trying other clustering settings")
     p.add_argument("--namer", choices=["llm", "medoid"], default="llm")
     p.add_argument("--model", default=DEFAULT_MODEL)
     args = p.parse_args(argv)
@@ -170,10 +173,15 @@ def main(argv=None):
     n_repos = len({a["paper_id"] for a in atoms})
     print(f"Loaded {len(atoms)} atoms from {n_repos} repos")
 
-    emb = np.asarray(embed([a["text"] for a in atoms], args.embedder, args.embedding_model), dtype=np.float32)
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
-    np.save(out.with_suffix(".npy"), emb)
+    cached = out.with_suffix(".npy")
+    if args.reuse_embeddings and cached.exists() and len(np.load(cached)) == len(atoms):
+        emb = np.load(cached)
+        print(f"Reusing embeddings from {cached}")
+    else:
+        emb = np.asarray(embed([a["text"] for a in atoms], args.embedder, args.embedding_model), dtype=np.float32)
+        np.save(cached, emb)
 
     reduced = reduce(emb, args.umap_components, args.umap_neighbors)
     labels = HDBSCAN(min_cluster_size=args.min_cluster_size, min_samples=args.min_samples, copy=True).fit_predict(reduced)

@@ -42,6 +42,9 @@ def row(idea):
         "infeasible": "no sensible project fits",
         "spec": "spec written, not built yet",
     }.get(status, status)
+    detail = html.escape(detail)
+    if idea.get("page_url"):  # a published web project: link straight to the playable page
+        detail += f' · <a href="{html.escape(idea["page_url"])}">play it</a>'
     stars = idea.get("stars")
     star_cell = f'<span class="stars">{stars}</span><span class="unit">stars</span>' if stars is not None else ""
     return f"""
@@ -50,7 +53,7 @@ def row(idea):
   <div class="body">
     <h2>{title}</h2>
     <p class="pitch">{html.escape(spec.get("pitch", ""))}</p>
-    <p class="detail"><span class="badge {status}">{status}</span> {html.escape(detail)}</p>
+    <p class="detail"><span class="badge {status}">{status}</span> {detail}</p>
   </div>
   <div class="metric">
     <div class="sounding" title="How far this combination sits from any existing developer community">
