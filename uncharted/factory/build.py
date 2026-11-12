@@ -409,6 +409,18 @@ class PythonTarget:
     def hints(self, out, pkg, idea):
         return stdlib_hints(out, pkg, allowed_imports(idea))
 
+    def play_check(self, root, idea, args):
+        return None  # nothing to watch: a Python project is judged by its tests alone
+
+
+def play_verdict(target, root, idea, args, seen):
+    """The target's play check for the project as it is now, asked once per state: a rolled back
+    project is the same files again, and the answer was already paid for."""
+    key = json.dumps(save_state(root), sort_keys=True)
+    if key not in seen:
+        seen[key] = target.play_check(root, idea, args)
+    return seen[key]
+
 
 def target_for(idea):
     return web.WebTarget() if idea.get("spec_prompt") in WEB_PROMPTS else PythonTarget()
@@ -435,6 +447,7 @@ def build_one(reg, slug, args, sandbox):
 
     checklist = idea["spec"].get("tests") or []
     best, best_score = None, None
+    play_seen, play_rounds = {}, 0
     for it in range(1, args.max_iters + 1):
         leftover = target.prepare(root, pkg, args, idea)
         passed, failed, out = target.run_tests(root, sandbox)
@@ -462,11 +475,22 @@ def build_one(reg, slug, args, sandbox):
             if not target.tests_look_real(root, pkg):
                 out = target.trivial
             else:
-                reg.update(slug, status="built", iterations=it, tests_passed=passed, loc=loc(root),
-                           history=history, package=pkg, build_model=args.model, sandbox=sandbox,
-                           target=target.name,
-                           spec_checks=len(checklist) if args.spec_gate else None)
-                return "built"
+                # The tests pass; now does it do what the spec says when someone opens it? The
+                # verdict comes from a model looking at screenshots, so it gets a bounded number of
+                # fix rounds and is then recorded, never left to fail a build that passes its tests.
+                play = play_verdict(target, root, idea, args, play_seen) if args.play_gate else None
+                if play:
+                    history.append({"iter": it, "plays": play["ok"], "problems": play["problems"]})
+                    print(f"    iter {it}: play check: " + ("plays" if play["ok"] else "; ".join(play["problems"])[:300]))
+                if play and not play["ok"] and play_rounds < args.play_rounds and it < args.max_iters:
+                    play_rounds += 1
+                    out = target.play_report(play, idea)
+                else:
+                    reg.update(slug, status="built", iterations=it, tests_passed=passed, loc=loc(root),
+                               history=history, package=pkg, build_model=args.model, sandbox=sandbox,
+                               target=target.name, play=play,
+                               spec_checks=len(checklist) if args.spec_gate else None)
+                    return "built"
         elif failed == 0 and passed < args.min_tests:
             out = f"Only {passed} tests ran; write at least {args.min_tests} covering the spec.\n" + out
         if missing:
@@ -501,6 +525,13 @@ def main(argv=None):
     p.add_argument("--no-spec-gate", dest="spec_gate", action="store_false",
                    help="Count a build as done when its own tests pass, without requiring one passing "
                         "test_spec_NN test per spec checklist entry (the pre-2026-11-08 behaviour)")
+    p.add_argument("--no-play-gate", dest="play_gate", action="store_false",
+                   help="Web projects: skip the play check (screenshots of a short session, shown to "
+                        "--play-model next to the spec) that runs once the tests pass")
+    p.add_argument("--play-rounds", type=int, default=2,
+                   help="Fix rounds the play check may ask for; after that its verdict is only recorded")
+    p.add_argument("--play-model", default=None,
+                   help="Model that looks at the screenshots; must take pictures (default: --model)")
     p.add_argument("--sandbox", choices=["auto", "docker", "local"], default="auto")
     p.add_argument("--model", default=llm.DEFAULT_MODEL)
     p.add_argument("--rpm", type=int, default=8)

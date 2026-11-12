@@ -11,7 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 pytest.importorskip("playwright")
 
 from uncharted import llm  # noqa: E402
-from uncharted.factory import build, gallery, publish, registry, spec, web  # noqa: E402
+from uncharted.factory import build, gallery, play, publish, registry, spec, web  # noqa: E402
 
 INDEX = """<!doctype html>
 <meta charset="utf-8">
@@ -131,6 +131,8 @@ def test_a_broken_tests_file_is_one_clear_failure(tmp_path):
 
 
 def test_web_factory_end_to_end(tmp_path, monkeypatch):
+    plays = []
+
     def fake_chat(prompt, model=None, rpm=8, **kw):
         if "do not want to close" in prompt:
             return json.dumps(SPEC)
@@ -139,6 +141,9 @@ def test_web_factory_end_to_end(tmp_path, monkeypatch):
             return "\n".join(f"===== FILE: {rel} =====\n{text}" for rel, text in {
                 "index.html": INDEX, "src/life.js": BUGGY_LIFE, "src/main.js": MAIN, "tests/tests.js": TESTS,
             }.items()) + "\n===== END ====="
+        if "play-testing" in prompt:
+            plays.append(len(kw["images"]))
+            return json.dumps({"seen": "A row of three yellow cells that flips on input.", "plays": True, "problems": []})
         if "fails its tests" in prompt:
             assert "TEST OUTPUT" in prompt and "test_blinker_returns" in prompt
             assert "===== tests/tests.js =====" in prompt and "===== tests/harness.js =====" not in prompt
@@ -163,6 +168,8 @@ def test_web_factory_end_to_end(tmp_path, monkeypatch):
     assert idea["status"] == "built", idea
     assert idea["iterations"] == 2 and idea["tests_passed"] == 6
     assert idea["target"] == "web" and idea["sandbox"] == "chrome"
+    assert plays == [7] and idea["play"]["ok"] and len(idea["play"]["changes"]) == 6
+    assert (out / "play" / "blinker" / "frame_7.png").read_bytes().startswith(b"\x89PNG")
     root = out / "projects" / "blinker"
     assert idea["loc"] == sum(len((root / f).read_text().splitlines()) for f in ("index.html", "src/life.js", "src/main.js"))
 
@@ -174,3 +181,58 @@ def test_web_factory_end_to_end(tmp_path, monkeypatch):
 
     gallery.main(["--out", str(out)])
     assert "Blinker" in (out / "gallery" / "index.html").read_text()
+
+
+FROZEN = MAIN.replace('addEventListener("keydown", advance);', "")  # passes the page check, but keys do nothing
+
+
+def build_with_reviewer(tmp_path, monkeypatch, verdicts, extra=()):
+    """One web project whose first draft already passes its tests; the reviewer answers from `verdicts`."""
+    seen = {"fixes": [], "reviews": 0}
+
+    def fake_chat(prompt, model=None, rpm=8, **kw):
+        if "play-testing" in prompt:
+            assert "changed since screenshot 1" in prompt and "Poke a cellular automaton." in prompt
+            seen["reviews"] += 1
+            return json.dumps(verdicts.pop(0))
+        if "as one static web page" in prompt:
+            return "\n".join(f"===== FILE: {rel} =====\n{text}" for rel, text in {
+                "index.html": INDEX, "src/life.js": LIFE, "src/main.js": FROZEN, "tests/tests.js": TESTS,
+            }.items()) + "\n===== END ====="
+        if "fails its tests" in prompt:
+            seen["fixes"].append(prompt)
+            return f"===== FILE: src/main.js =====\n{MAIN}\n===== END ====="
+        raise AssertionError("unexpected prompt")
+
+    monkeypatch.setattr(llm, "chat", fake_chat)
+    out = tmp_path / "factory_out"
+    reg = registry.Registry(out)
+    reg.update("blinker", status="spec", atoms=["a", "b", "c"], spec=SPEC, spec_prompt="web")
+    build.main(["--out", str(out), "--rpm", "999", *extra])
+    return registry.Registry(out).ideas["blinker"], seen
+
+
+def test_play_faults_go_back_to_the_fixer(tmp_path, monkeypatch):
+    bad = {"seen": "Three cells that never move.", "plays": False, "problems": ["a click does nothing; it should flip the row"]}
+    good = {"seen": "The row flips to a column on a click.", "plays": True, "problems": []}
+    idea, seen = build_with_reviewer(tmp_path, monkeypatch, [bad, good])
+    assert idea["status"] == "built" and idea["iterations"] == 2 and idea["play"]["ok"]
+    assert len(seen["fixes"]) == 1 and play.PLAY_TEST in seen["fixes"][0]
+    assert "a click does nothing; it should flip the row" in seen["fixes"][0] and "Three cells that never move." in seen["fixes"][0]
+    assert [h["plays"] for h in idea["history"] if "plays" in h] == [False, True]
+
+
+def test_play_check_is_bounded_and_then_only_recorded(tmp_path, monkeypatch):
+    bad = {"seen": "Nothing moves.", "plays": False, "problems": ["frozen"]}
+    # The fix changes the files once; after that the project is the same state and is not judged again.
+    idea, seen = build_with_reviewer(tmp_path, monkeypatch, [dict(bad), dict(bad)], extra=["--play-rounds", "1"])
+    assert idea["status"] == "built" and idea["iterations"] == 2
+    assert idea["play"]["ok"] is False and idea["play"]["problems"] == ["frozen"]
+    assert len(seen["fixes"]) == 1 and seen["reviews"] == 2
+
+
+def test_play_gate_off_or_broken_reviewer_never_blocks_a_build(tmp_path, monkeypatch):
+    idea, seen = build_with_reviewer(tmp_path / "off", monkeypatch, [], extra=["--no-play-gate"])
+    assert idea["status"] == "built" and idea["play"] is None and seen["reviews"] == 0
+    idea, seen = build_with_reviewer(tmp_path / "broken", monkeypatch, ["this model cannot see pictures"])
+    assert idea["status"] == "built" and idea["play"] is None and seen["fixes"] == []

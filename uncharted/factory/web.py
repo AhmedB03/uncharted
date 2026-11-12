@@ -483,3 +483,11 @@ class WebTarget:
 
     def hints(self, out, pkg, idea):
         return hints(out)
+
+    def play_check(self, root, idea, args):
+        from . import play  # play imports this module
+        return play.check(root, idea["spec"], args.play_model or args.model, args.rpm, keep=play.keep_dir(root))
+
+    def play_report(self, verdict, idea):
+        from . import play
+        return play.report(verdict, idea["spec"])

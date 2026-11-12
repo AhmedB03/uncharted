@@ -12,6 +12,7 @@ Step 1 (this repo):
 The alien factory:
     spec        Turn alien combinations into small buildable project specs
     build       Model writes the code, pytest runs, failures go back, repeat
+    play        Web projects: record a short session and ask a model whether it plays like the spec
     publish     Ship passing projects to GitHub, labeled as AI made (dry run by default)
     gallery     Static page of everything made, ranked by stars
     benchmark   Common vs alien: same model, same loop, compare build success
@@ -56,6 +57,7 @@ COMMANDS = {
     "explore": "uncharted.factory.explore",
     "spec": "uncharted.factory.spec",
     "build": "uncharted.factory.build",
+    "play": "uncharted.factory.play",
     "publish": "uncharted.factory.publish",
     "gallery": "uncharted.factory.gallery",
     "benchmark": "uncharted.factory.benchmark",
