@@ -18,9 +18,13 @@ def reasoning_off(model):
     """Extra completion arguments that stop an OpenRouter model from thinking before it answers.
 
     DeepSeek v4 and Claude Haiku 5.5 think by default on OpenRouter, and the hidden reasoning can
-    use up all of max_tokens and leave the reply empty. UNCHARTED_REASONING=on keeps it.
+    use up all of max_tokens and leave the reply empty. UNCHARTED_REASONING=on keeps it, and
+    low, medium or high keep it at that effort (Claude Sonnet 5.5 refuses to run with it off).
     """
-    if model.startswith("openrouter/") and os.environ.get("UNCHARTED_REASONING", "off") != "on":
+    mode = os.environ.get("UNCHARTED_REASONING", "off")
+    if model.startswith("openrouter/") and mode != "on":
+        if mode in ("low", "medium", "high"):
+            return {"extra_body": {"reasoning": {"effort": mode}}}
         return {"extra_body": {"reasoning": {"enabled": False}}}
     return {}
 
@@ -62,7 +66,10 @@ def chat(prompt, model=None, rpm=8, max_tokens=8000, temperature=0.4, system=Non
                 # cuts the spec/files/pytest output out of fix prompts.
                 extra["num_ctx"] = int(os.environ.get("UNCHARTED_NUM_CTX", "16384"))
             # Without a timeout one stalled provider connection blocks the whole run for 10+ minutes.
-            timeout = float(os.environ.get("UNCHARTED_LLM_TIMEOUT", "1800" if model.startswith("ollama") else "240"))
+            # A long reply needs longer: 32,000 tokens at 40 a second is over 13 minutes, and a call
+            # cut off at 240 s is paid for in full and then sent again.
+            timeout = float(os.environ.get("UNCHARTED_LLM_TIMEOUT", "1800" if model.startswith("ollama")
+                                           else str(max(240, max_tokens // 40 + 60))))
             r = completion(model=model, messages=messages, max_tokens=max_tokens, temperature=temperature,
                            timeout=timeout, **extra)
             text = r.choices[0].message.content or ""

@@ -236,3 +236,14 @@ def test_play_gate_off_or_broken_reviewer_never_blocks_a_build(tmp_path, monkeyp
     assert idea["status"] == "built" and idea["play"] is None and seen["reviews"] == 0
     idea, seen = build_with_reviewer(tmp_path / "broken", monkeypatch, ["this model cannot see pictures"])
     assert idea["status"] == "built" and idea["play"] is None and seen["fixes"] == []
+
+
+def test_tests_that_never_register_with_the_harness_are_one_clear_failure(tmp_path):
+    exported = TESTS.replace('test("test_spec_01_blinker_flips", ', "export const t1 = (").replace(
+        'test("test_blinker_returns", ', "export const t2 = (").replace(
+        'test("test_neighbours", ', "export const t3 = (").replace(
+        'test("test_empty_stays_empty", ', "export const t4 = (").replace(
+        'test("test_bad_grid_throws", ', "export const t5 = (")
+    passed, failed, out = web.run_tests(project(tmp_path, **{"tests/tests.js": exported}))
+    assert (passed, failed) == (1, 1) and "FAILED tests/tests.js::no_tests_registered" in out
+    assert "ZERO tests ran" in web.hints(out) and "./harness.js" in web.hints(out)

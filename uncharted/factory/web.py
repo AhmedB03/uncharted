@@ -139,6 +139,12 @@ TESTS_HTML = """<!doctype html>
   try {
     await import("./tests.js");
     results = await run();
+    if (results.length === 0) {
+      results = [{ name: "no_tests_registered", ok: false, assertions: 0,
+                   error: "tests/tests.js loaded but registered no tests, so no test ran. Exported functions and " +
+                          "node:test or other runners are never called: each test must be registered with " +
+                          "test(name, fn) imported from ./harness.js." }];
+    }
   } catch (e) {
     results = [{ name: "load_tests", ok: false, assertions: 0,
                  error: "tests/tests.js could not be loaded, so no test ran: " + String((e && e.stack) || e) }];
@@ -452,6 +458,13 @@ def hints(out):
     if "could not be loaded, so no test ran" in out:
         found.append("- tests/tests.js failed to load, so ZERO tests ran. Fix that import or syntax error first: "
                      "check that every name it imports is really exported by the module it names.")
+    if "registered no tests" in out:
+        found.append("- ZERO tests ran: tests/tests.js never calls the supplied harness. Nothing is run with node, "
+                     "npm or any other runner (delete package.json and other test files). tests/tests.js must "
+                     "start with `import { test, assert, assertEqual, assertClose, assertThrows } from "
+                     "\"./harness.js\";` and register every test as `test(\"test_spec_01_short_name\", () => { "
+                     "assertEqual(actual, expected); });`, using the harness's assert functions (a test that "
+                     "makes no harness assertion fails).")
     return ("HINTS:\n" + "\n".join(found) + "\n\n") if found else ""
 
 

@@ -82,9 +82,12 @@ what these frames can show:
   frozen where they should move, text on top of other text, a blank or nearly blank playfield,
   everything collapsed into one spot, an error message on the page?
 
-Be strict about what is plainly wrong and silent about taste: a plain page that does what the spec
-says plays. Every problem must name what is on screen and what should be there instead, in words
-the programmer can act on without seeing the screenshots.
+Be strict about what is plainly wrong and silent about taste and polish: a plain page that does
+what the spec says plays. Something dim, small or unlabelled, two markers that overlap before the
+first move, or a panel that is still empty because nothing has been played yet, is not a fault.
+List a problem only when it stops the page doing what the spec says, or would stop a stranger from
+using it. Every problem must name what is on screen and what should be there instead, in words the
+programmer can act on without seeing the screenshots.
 
 Reply with JSON only:
 {{"seen": "two sentences on what the frames actually show",
